@@ -283,7 +283,8 @@ function Process-ExcelWorkbook {
         $excel.DisplayAlerts  = $false
         $excel.ScreenUpdating = $false
         $excel.EnableEvents   = $false
-        $excel.Calculation    = -4135   # xlCalculationManual - disables auto-recalc for speed
+        # Note: Calculation is set after workbook open - some Excel versions
+        # throw 0x800A03EC if set on the Application before any workbook is loaded.
 
         # -- Open workbook -----------------------------------------------------
         Write-Log "Opening workbook: '$InputPath'"
@@ -297,6 +298,7 @@ function Process-ExcelWorkbook {
             return [PSCustomObject]@{ Success = $false; Counts = $counts; FormulaWarnings = $formulaWarnings }
         }
 
+        $excel.Calculation = -4135   # xlCalculationManual - disables auto-recalc for speed
         $totalSheets = $workbook.Worksheets.Count
         Write-Log "Workbook opened. Found $totalSheets worksheet(s)."
 
