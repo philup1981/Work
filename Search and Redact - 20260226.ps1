@@ -1,4 +1,4 @@
-#Requires -Version 5.0
+﻿#Requires -Version 5.0
 <#
 .SYNOPSIS
     Search and Redact Tool - Replaces specified search terms in spreadsheets with defined replacement text.
@@ -268,7 +268,7 @@ function Process-ExcelWorkbook {
     $success  = $false
 
     try {
-        # ── Create Excel COM instance ─────────────────────────────────────────
+        # -- Create Excel COM instance -----------------------------------------
         Write-Log "Initialising Microsoft Excel COM automation..."
         try {
             $excel = New-Object -ComObject Excel.Application -ErrorAction Stop
@@ -283,9 +283,9 @@ function Process-ExcelWorkbook {
         $excel.DisplayAlerts  = $false
         $excel.ScreenUpdating = $false
         $excel.EnableEvents   = $false
-        $excel.Calculation    = -4135   # xlCalculationManual — disables auto-recalc for speed
+        $excel.Calculation    = -4135   # xlCalculationManual - disables auto-recalc for speed
 
-        # ── Open workbook ─────────────────────────────────────────────────────
+        # -- Open workbook -----------------------------------------------------
         Write-Log "Opening workbook: '$InputPath'"
         try {
             # Open(Filename, UpdateLinks=0, ReadOnly=false)
@@ -300,7 +300,7 @@ function Process-ExcelWorkbook {
         $totalSheets = $workbook.Worksheets.Count
         Write-Log "Workbook opened. Found $totalSheets worksheet(s)."
 
-        # ── Process each worksheet ────────────────────────────────────────────
+        # -- Process each worksheet --------------------------------------------
         $sheetIndex = 0
         foreach ($worksheet in $workbook.Worksheets) {
             $sheetIndex++
@@ -312,7 +312,7 @@ function Process-ExcelWorkbook {
                 $usedRange = $worksheet.UsedRange
 
                 if ($null -eq $usedRange) {
-                    Write-Log "    Worksheet '$sheetName' has no used range — skipping."
+                    Write-Log "    Worksheet '$sheetName' has no used range - skipping."
                     continue
                 }
 
@@ -334,7 +334,7 @@ function Process-ExcelWorkbook {
                         try {
                             $cell = $usedRange.Cells.Item($row, $col)
 
-                            # ── Formula cells: warn, do not replace ──────────
+                            # -- Formula cells: warn, do not replace ----------
                             if ($cell.HasFormula) {
                                 $displayedText = $cell.Text
                                 if (-not [string]::IsNullOrEmpty($displayedText)) {
@@ -346,7 +346,7 @@ function Process-ExcelWorkbook {
                                             $absRow = $usedRange.Row    + $row - 1
                                             $absCol = $usedRange.Column + $col - 1
                                             $addr   = try { $cell.Address } catch { "R${absRow}C${absCol}" }
-                                            $warnMsg = "Search term '$term' found in FORMULA CELL — Sheet='$sheetName', Cell=$addr (Row=$absRow, Col=$absCol). Formula cells are not automatically replaced to avoid breaking formulas. Manual review required."
+                                            $warnMsg = "Search term '$term' found in FORMULA CELL - Sheet='$sheetName', Cell=$addr (Row=$absRow, Col=$absCol). Formula cells are not automatically replaced to avoid breaking formulas. Manual review required."
                                             $formulaWarnings.Add($warnMsg)
                                         }
                                     }
@@ -354,7 +354,7 @@ function Process-ExcelWorkbook {
                                 continue   # skip to next cell
                             }
 
-                            # ── Non-formula cells: get value ─────────────────
+                            # -- Non-formula cells: get value -----------------
                             $cellValue = $cell.Value2
 
                             # Only process non-null string values
@@ -426,7 +426,7 @@ function Process-ExcelWorkbook {
         # Re-enable auto-calculation before saving
         $excel.Calculation = -4105   # xlCalculationAutomatic
 
-        # ── Save workbook to output path ──────────────────────────────────────
+        # -- Save workbook to output path --------------------------------------
         Write-Log "Saving updated workbook to: '$OutputPath'"
         try {
             # Remove existing output file to avoid format-mismatch prompts
@@ -447,7 +447,7 @@ function Process-ExcelWorkbook {
             -Message "CRITICAL: Unexpected error during Excel processing: $($_.Exception.Message)"
     }
     finally {
-        # ── Release all COM objects ───────────────────────────────────────────
+        # -- Release all COM objects -------------------------------------------
         if ($null -ne $workbook) {
             try { $workbook.Close($false) } catch { }
             [System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) | Out-Null
@@ -545,14 +545,14 @@ Write-Banner
 $scriptStartTime = Get-Date
 
 # ------------------------------------------------------------------------------
-# STEP 1 — Collect user inputs
+# STEP 1 - Collect user inputs
 # ------------------------------------------------------------------------------
 
 Write-Host "Please provide the following information." -ForegroundColor Yellow
 Write-Host "Tip: You can paste paths directly, including network paths (e.g. \\\\server\\share\\file.xlsx)." -ForegroundColor Gray
 Write-Host ""
 
-# ── Spreadsheet path ──────────────────────────────────────────────────────────
+# -- Spreadsheet path ----------------------------------------------------------
 do {
     Write-Host "SPREADSHEET" -ForegroundColor Cyan
     $spreadsheetPath = (Read-Host "  Enter the full path and filename of the spreadsheet").Trim().Trim('"').Trim("'")
@@ -564,7 +564,7 @@ do {
 
 Write-Host ""
 
-# ── Search terms file path ────────────────────────────────────────────────────
+# -- Search terms file path ----------------------------------------------------
 do {
     Write-Host "SEARCH TERMS FILE" -ForegroundColor Cyan
     Write-Host "  (Plain text file, one search term per line)" -ForegroundColor Gray
@@ -577,7 +577,7 @@ do {
 
 Write-Host ""
 
-# ── Replacement text ──────────────────────────────────────────────────────────
+# -- Replacement text ----------------------------------------------------------
 Write-Host "REPLACEMENT TEXT" -ForegroundColor Cyan
 Write-Host "  This text replaces every matched search term in the spreadsheet." -ForegroundColor Gray
 Write-Host "  Square brackets [ ] are fully supported (e.g. [REDACTED], [REMOVED])." -ForegroundColor Gray
@@ -637,7 +637,7 @@ Write-Host "-----------------------------------------------------------------" -
 Write-Host ""
 
 # ------------------------------------------------------------------------------
-# STEP 2 — Validate input files (must exist and be readable BEFORE proceeding)
+# STEP 2 - Validate input files (must exist and be readable BEFORE proceeding)
 # ------------------------------------------------------------------------------
 
 Write-Log "Validating input files..."
@@ -678,7 +678,7 @@ if (-not $stValidation.Success) {
 Write-Log "Search terms file OK." -Level "SUCCESS"
 
 # ------------------------------------------------------------------------------
-# STEP 3 — Load search terms
+# STEP 3 - Load search terms
 # ------------------------------------------------------------------------------
 
 Write-Log "Loading search terms..."
@@ -700,7 +700,7 @@ for ($i = 0; $i -lt $searchTerms.Count; $i++) {
 Write-Host ""
 
 # ------------------------------------------------------------------------------
-# STEP 4 — Determine and create the Output directory
+# STEP 4 - Determine and create the Output directory
 # ------------------------------------------------------------------------------
 
 Write-Log "Configuring output directory..."
@@ -746,7 +746,7 @@ try {
         Write-Log "Output directory created." -Level "SUCCESS"
     }
     else {
-        Write-Log "Output directory already exists — files will be overwritten if present."
+        Write-Log "Output directory already exists - files will be overwritten if present."
     }
 }
 catch [System.UnauthorizedAccessException] {
@@ -786,7 +786,7 @@ catch {
 }
 
 # ------------------------------------------------------------------------------
-# STEP 5 — Process the spreadsheet
+# STEP 5 - Process the spreadsheet
 # ------------------------------------------------------------------------------
 
 Write-Host ""
@@ -803,7 +803,7 @@ $textExtensions  = @('txt')
 $processingResult = $null
 
 if ($excelExtensions -contains $fileExtension) {
-    # ── Excel workbook ────────────────────────────────────────────────────────
+    # -- Excel workbook --------------------------------------------------------
     Write-Log "File type: Excel workbook (.$fileExtension)"
 
     if (-not (Test-ExcelInstalled)) {
@@ -824,7 +824,7 @@ if ($excelExtensions -contains $fileExtension) {
         -ErrorLogPath    $errorLogPath
 }
 elseif (($csvExtensions + $textExtensions) -contains $fileExtension) {
-    # ── CSV / plain text ──────────────────────────────────────────────────────
+    # -- CSV / plain text ------------------------------------------------------
     Write-Log "File type: CSV/text file (.$fileExtension)"
     $processingResult = Process-CsvFile `
         -InputPath       $spreadsheetPath `
@@ -834,7 +834,7 @@ elseif (($csvExtensions + $textExtensions) -contains $fileExtension) {
         -ErrorLogPath    $errorLogPath
 }
 else {
-    # ── Unknown extension: try Excel COM first, then fail gracefully ──────────
+    # -- Unknown extension: try Excel COM first, then fail gracefully ----------
     Write-Log "File extension '.$fileExtension' is not in the standard list." -Level "WARN"
     Write-ErrorEntry -ErrorLogPath $errorLogPath -Level "WARN" `
         -Message "Unrecognised file extension '.$fileExtension'. Attempting Excel COM automation as a fallback."
@@ -858,7 +858,7 @@ else {
 }
 
 # ------------------------------------------------------------------------------
-# STEP 6 — Write Results.txt
+# STEP 6 - Write Results.txt
 # ------------------------------------------------------------------------------
 
 $scriptEndTime = Get-Date
@@ -892,7 +892,7 @@ foreach ($term in $searchTerms) {
         $count = $processingResult.Counts[$term]
     }
     $totalReplacements += $count
-    $label = if ($count -eq 0) { "0  (NOT FOUND — no replacements made)" } else { "$count replacement(s)" }
+    $label = if ($count -eq 0) { "0  (NOT FOUND - no replacements made)" } else { "$count replacement(s)" }
     $resultsLines.Add("  '$term'  :  $label")
 }
 
@@ -947,7 +947,7 @@ try {
 catch { }
 
 # ------------------------------------------------------------------------------
-# STEP 7 — Final summary on screen
+# STEP 7 - Final summary on screen
 # ------------------------------------------------------------------------------
 
 Write-Host ""
