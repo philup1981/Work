@@ -8,7 +8,7 @@
     in the specified spreadsheet across ALL worksheets. It supports Excel formats (.xlsx, .xlsm, .xls,
     .xlsb, etc.) via Excel COM automation and CSV/text files natively. No external modules required.
 
-    Output files are created in an "Output" directory located one level above the spreadsheet's folder:
+    Output files are created in an "Output" directory located inside the same folder as the spreadsheet:
       - Updated_<original filename>  : The modified spreadsheet
       - Results.txt                  : Replacement counts per search term
       - Error.txt                    : Any errors or warnings encountered
@@ -722,15 +722,7 @@ if ([string]::IsNullOrEmpty($spreadsheetDir)) {
     exit 1
 }
 
-# One level above the spreadsheet's folder
-$parentDir = [System.IO.Path]::GetDirectoryName($spreadsheetDir)
-if ([string]::IsNullOrEmpty($parentDir)) {
-    # Edge case: spreadsheet is in the root of a drive or UNC share root
-    Write-Log "Note: Spreadsheet is in a root-level folder. Output directory will be created alongside it." -Level "WARN"
-    $parentDir = $spreadsheetDir
-}
-
-$outputDir             = [System.IO.Path]::Combine($parentDir, "Output")
+$outputDir             = [System.IO.Path]::Combine($spreadsheetDir, "Output")
 $originalFileName      = [System.IO.Path]::GetFileName($spreadsheetPath)
 $outputSpreadsheetPath = [System.IO.Path]::Combine($outputDir, "Updated_$originalFileName")
 $errorLogPath          = [System.IO.Path]::Combine($outputDir, "Error.txt")
