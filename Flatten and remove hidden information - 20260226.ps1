@@ -269,7 +269,8 @@ function Invoke-ProcessWorkbook {
                         $ptObj = $ws.PivotTables($p)
                         $ptObj.TableRange2.ClearOutline()
                         $ptObj.TableRange1.Clear()
-                        $ptRange.PasteSpecial(-4163)
+                        $ptRange.PasteSpecial(-4122)   # xlPasteFormats  — restore cell highlights/colours
+                        $ptRange.PasteSpecial(-4163)   # xlPasteValues
                         Release-Com $ptObj
                     } catch {}
 
