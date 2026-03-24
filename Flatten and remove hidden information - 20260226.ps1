@@ -58,6 +58,7 @@ function New-FileCounts {
     # Returns a fresh ordered hashtable of counters for one file.
     return [ordered]@{
         "Pivot Tables Flattened"                   = 0
+        "Formulas Flattened"                       = 0
         "Charts Converted to Images"               = 0
         "External Connections Removed"             = 0
         "Named Ranges Pointing Externally Removed" = 0
@@ -287,7 +288,29 @@ function Invoke-ProcessWorkbook {
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
-        # D2: Convert charts to static images
+        # D2: Flatten remaining formulas to static values
+        try {
+            $usedRng = $ws.UsedRange
+            try {
+                $formulaCells = $usedRng.SpecialCells(-4123)   # xlCellTypeFormulas
+                $formulaCount = $formulaCells.Count
+                $formulaCells.Copy()
+                $formulaCells.PasteSpecial(-4163)              # xlPasteValues
+                $Excel.CutCopyMode = $false
+                $counts["Formulas Flattened"] += $formulaCount
+                Write-Log $ResultsFile "      Formulas flattened: $formulaCount"
+                Release-Com $formulaCells
+            } catch {
+                # SpecialCells throws a COMException when no matching cells exist — that is normal
+                Write-Log $ResultsFile "      Formulas found: 0"
+            }
+            Release-Com $usedRng
+        } catch {
+            $msg = "      Error flattening formulas in '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # D3: Convert charts to static images
         try {
             $coCount = $ws.ChartObjects().Count
             Write-Log $ResultsFile "      Chart objects found: $coCount"
@@ -321,7 +344,7 @@ function Invoke-ProcessWorkbook {
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
-        # D3: Remove hidden rows
+        # D4: Remove hidden rows
         try {
             $usedRange        = $ws.UsedRange
             $firstRow         = $usedRange.Row
@@ -357,7 +380,7 @@ function Invoke-ProcessWorkbook {
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
-        # D4: Remove hidden columns
+        # D5: Remove hidden columns
         try {
             $usedRange        = $ws.UsedRange
             $firstCol         = $usedRange.Column
@@ -393,7 +416,7 @@ function Invoke-ProcessWorkbook {
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
-        # D5: Remove hidden ListObjects (tables)
+        # D6: Remove hidden ListObjects (tables)
         try {
             $loCount     = $ws.ListObjects.Count
             $hiddenTbls  = @()
