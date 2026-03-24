@@ -281,7 +281,10 @@ function Invoke-ProcessWorkbook {
                             Release-Com $ptObj
                         } catch {}
 
-                        # Restore colours from temp sheet — pivot engine is gone, so they will persist
+                        # Wipe residual pivot-table cell formatting so it cannot interfere with the restore
+                        $ptRange.ClearFormats()
+
+                        # Restore colours from temp sheet — pivot engine is gone and cells are clean, so formats persist
                         $tmpRange = $tmpSheet.Range(
                             $tmpSheet.Cells(1, 1),
                             $tmpSheet.Cells($ptRange.Rows.Count, $ptRange.Columns.Count)
