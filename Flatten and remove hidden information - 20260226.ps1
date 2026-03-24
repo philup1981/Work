@@ -293,7 +293,7 @@ function Invoke-ProcessWorkbook {
             $usedRng = $ws.UsedRange
             $usedRng.Copy()
             $usedRng.PasteSpecial(-4163)               # xlPasteValues — replaces every formula with its result
-            $Excel.CutCopyMode = $false
+            $Excel.CutCopyMode = 0
             $counts["Formulas Flattened"]++
             Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
@@ -315,7 +315,7 @@ function Invoke-ProcessWorkbook {
 
                     $co.CopyPicture(1, -4147)   # xlScreen, xlPicture
                     $ws.Paste()
-                    $Excel.CutCopyMode = $false
+                    $Excel.CutCopyMode = 0
 
                     $pic = $ws.Shapes.Item($ws.Shapes.Count)
                     $pic.Left = $coLeft; $pic.Top  = $coTop
