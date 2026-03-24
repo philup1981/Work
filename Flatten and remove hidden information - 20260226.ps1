@@ -251,6 +251,15 @@ function Invoke-ProcessWorkbook {
                     $ptName  = $pt.Name
                     $ptRange = $pt.TableRange2
 
+                    if ($null -eq $ptRange) {
+                        # Pivot table has no resolvable range (broken/disconnected source).
+                        # Clear just the cache and skip copy-paste.
+                        try { $pt.PivotCache().MissingItemsLimit = 0 } catch {}
+                        Write-Log $ResultsFile "      Skipped pivot table '$ptName' (null range - broken data source)"
+                        Release-Com $pt
+                        continue
+                    }
+
                     $ptRange.Copy()
                     $ptRange.PasteSpecial(-4163)   # xlPasteValues
                     $pt.TableRange2.ClearContents()
