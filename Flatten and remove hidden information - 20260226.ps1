@@ -262,16 +262,12 @@ function Invoke-ProcessWorkbook {
                     }
 
                     $ptRange.Copy()
-                    $ptRange.PasteSpecial(-4163)   # xlPasteValues
-                    $pt.TableRange2.ClearContents()
-                    $ptRange.PasteSpecial(-4163)
+                    $ptRange.PasteSpecial(-4122)   # xlPasteFormats — bake pivot styles as real cell formats before clipboard is consumed
+                    $ptRange.PasteSpecial(-4163)   # xlPasteValues  — paste values on top, formats are already baked in
 
                     try {
                         $ptObj = $ws.PivotTables($p)
                         $ptObj.TableRange2.ClearOutline()
-                        $ptObj.TableRange1.Clear()
-                        $ptRange.PasteSpecial(-4122)   # xlPasteFormats  — restore cell highlights/colours
-                        $ptRange.PasteSpecial(-4163)   # xlPasteValues
                         Release-Com $ptObj
                     } catch {}
 
