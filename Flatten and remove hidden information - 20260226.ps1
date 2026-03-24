@@ -154,12 +154,12 @@ function Invoke-ProcessWorkbook {
                 Write-Log $ResultsFile "    Removed connection: '$connName'"
                 Release-Com $conn
             } catch {
-                $msg = "    Could not remove connection [$c]: $($_.Exception.Message)"
+                $msg = "    Could not remove connection [$c] [$($fileItem.Name)]: $($_.Exception.Message)"
                 Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
             }
         }
     } catch {
-        $msg = "    Error enumerating connections: $($_.Exception.Message)"
+        $msg = "    Error enumerating connections [$($fileItem.Name)]: $($_.Exception.Message)"
         Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
     }
 
@@ -187,12 +187,12 @@ function Invoke-ProcessWorkbook {
                 Write-Log $ResultsFile "    Removed: '$eName'"
                 Release-Com $nm
             } catch {
-                $msg = "    Could not remove named range '$eName': $($_.Exception.Message)"
+                $msg = "    Could not remove named range '$eName' [$($fileItem.Name)]: $($_.Exception.Message)"
                 Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
             }
         }
     } catch {
-        $msg = "    Error enumerating named ranges: $($_.Exception.Message)"
+        $msg = "    Error enumerating named ranges [$($fileItem.Name)]: $($_.Exception.Message)"
         Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
     }
 
@@ -216,7 +216,7 @@ function Invoke-ProcessWorkbook {
             }
             Release-Com $sh
         } catch {
-            $msg = "    Could not read sheet index $s visibility: $($_.Exception.Message)"
+            $msg = "    Could not read sheet index $s visibility [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
     }
@@ -237,7 +237,7 @@ function Invoke-ProcessWorkbook {
         try {
             $ws = $workbook.Sheets.Item($shName)
         } catch {
-            $msg = "      Could not access sheet '$shName': $($_.Exception.Message)"
+            $msg = "      Could not access sheet '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
             continue
         }
@@ -305,12 +305,12 @@ function Invoke-ProcessWorkbook {
                     Write-Log $ResultsFile "      Flattened pivot table: '$ptName'"
                     Release-Com $ptRange; Release-Com $pt
                 } catch {
-                    $msg = "      Error flattening pivot table $p in '$shName': $($_.Exception.Message)"
+                    $msg = "      Error flattening pivot table $p in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
             }
         } catch {
-            $msg = "      Error accessing pivot tables in '$shName': $($_.Exception.Message)"
+            $msg = "      Error accessing pivot tables in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
@@ -323,7 +323,7 @@ function Invoke-ProcessWorkbook {
             Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
         } catch {
-            $msg = "      Error flattening formulas in '$shName': $($_.Exception.Message)"
+            $msg = "      Error flattening formulas in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
@@ -352,12 +352,12 @@ function Invoke-ProcessWorkbook {
                     Write-Log $ResultsFile "      Converted chart to image: '$coName'"
                     Release-Com $co
                 } catch {
-                    $msg = "      Error converting chart $ch in '$shName': $($_.Exception.Message)"
+                    $msg = "      Error converting chart $ch in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
             }
         } catch {
-            $msg = "      Error accessing charts in '$shName': $($_.Exception.Message)"
+            $msg = "      Error accessing charts in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
@@ -384,7 +384,7 @@ function Invoke-ProcessWorkbook {
                     $counts["Hidden Rows Removed"]++
                     Release-Com $rObj
                 } catch {
-                    $msg = "      Error deleting hidden row $ri in '$shName': $($_.Exception.Message)"
+                    $msg = "      Error deleting hidden row $ri in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
             }
@@ -393,7 +393,7 @@ function Invoke-ProcessWorkbook {
             }
             Release-Com $usedRange
         } catch {
-            $msg = "      Error processing hidden rows in '$shName': $($_.Exception.Message)"
+            $msg = "      Error processing hidden rows in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
@@ -420,7 +420,7 @@ function Invoke-ProcessWorkbook {
                     $counts["Hidden Columns Removed"]++
                     Release-Com $cObj
                 } catch {
-                    $msg = "      Error deleting hidden column $ci in '$shName': $($_.Exception.Message)"
+                    $msg = "      Error deleting hidden column $ci in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
             }
@@ -429,7 +429,7 @@ function Invoke-ProcessWorkbook {
             }
             Release-Com $usedRange
         } catch {
-            $msg = "      Error processing hidden columns in '$shName': $($_.Exception.Message)"
+            $msg = "      Error processing hidden columns in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
@@ -457,12 +457,12 @@ function Invoke-ProcessWorkbook {
                     Write-Log $ResultsFile "      Removed hidden table: '$tblName'"
                     Release-Com $loObj
                 } catch {
-                    $msg = "      Error removing table '$tblName' in '$shName': $($_.Exception.Message)"
+                    $msg = "      Error removing table '$tblName' in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
             }
         } catch {
-            $msg = "      Error processing tables in '$shName': $($_.Exception.Message)"
+            $msg = "      Error processing tables in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
@@ -482,7 +482,7 @@ function Invoke-ProcessWorkbook {
             Write-Log $ResultsFile "    Deleted hidden sheet: '$shName'"
             Release-Com $sh
         } catch {
-            $msg = "    Error deleting hidden sheet '$shName': $($_.Exception.Message)"
+            $msg = "    Error deleting hidden sheet '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
     }
@@ -495,7 +495,7 @@ function Invoke-ProcessWorkbook {
             Write-Log $ResultsFile "    Deleted very-hidden sheet: '$shName'"
             Release-Com $sh
         } catch {
-            $msg = "    Error deleting very-hidden sheet '$shName': $($_.Exception.Message)"
+            $msg = "    Error deleting very-hidden sheet '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
     }
