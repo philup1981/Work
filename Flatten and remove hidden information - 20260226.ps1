@@ -261,15 +261,42 @@ function Invoke-ProcessWorkbook {
                         continue
                     }
 
+                    # Stage a copy on a temp sheet so formats bake as real Interior.Color
+                    # (pasting formats onto a live pivot table is overridden by the pivot engine;
+                    #  formats only persist once the pivot is gone from the target cells)
                     $ptRange.Copy()
-                    $ptRange.PasteSpecial(-4122)   # xlPasteFormats — bake pivot styles as real cell formats before clipboard is consumed
-                    $ptRange.PasteSpecial(-4163)   # xlPasteValues  — paste values on top, formats are already baked in
-
+                    $tmpSheet = $null
                     try {
-                        $ptObj = $ws.PivotTables($p)
-                        $ptObj.TableRange2.ClearOutline()
-                        Release-Com $ptObj
-                    } catch {}
+                        $tmpSheet = $ws.Parent.Worksheets.Add()
+                        $tmpSheet.Cells(1, 1).PasteSpecial(-4163)   # xlPasteValues  — stage values
+                        $tmpSheet.Cells(1, 1).PasteSpecial(-4122)   # xlPasteFormats — stage formats (no pivot engine here, they stick)
+
+                        # Flatten the original range — this destroys the pivot data connection
+                        $ptRange.PasteSpecial(-4163)   # xlPasteValues
+
+                        # Discard the now-dead pivot object
+                        try {
+                            $ptObj = $ws.PivotTables($p)
+                            $ptObj.TableRange2.ClearOutline()
+                            Release-Com $ptObj
+                        } catch {}
+
+                        # Restore colours from temp sheet — pivot engine is gone, so they will persist
+                        $tmpRange = $tmpSheet.Range(
+                            $tmpSheet.Cells(1, 1),
+                            $tmpSheet.Cells($ptRange.Rows.Count, $ptRange.Columns.Count)
+                        )
+                        $tmpRange.Copy()
+                        $ptRange.PasteSpecial(-4122)   # xlPasteFormats — colours now stick on static cells
+                        Release-Com $tmpRange
+                    } finally {
+                        if ($null -ne $tmpSheet) {
+                            $Excel.DisplayAlerts = $false
+                            $tmpSheet.Delete()
+                            $Excel.DisplayAlerts = $true
+                            Release-Com $tmpSheet
+                        }
+                    }
 
                     $counts["Pivot Tables Flattened"]++
                     Write-Log $ResultsFile "      Flattened pivot table: '$ptName'"
