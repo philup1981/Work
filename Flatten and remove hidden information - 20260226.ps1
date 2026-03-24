@@ -25,7 +25,7 @@
 #>
 
 [CmdletBinding()]
-param()   # No parameters – folder path is prompted interactively.
+param()   # No parameters - folder path is prompted interactively.
 
 Set-StrictMode -Off   # Allow unset variables without terminating.
 
@@ -72,9 +72,9 @@ function New-FileCounts {
 
 # ---------------------------------------------------------------------------
 # Processes a single workbook. Returns a hashtable with:
-#   Counts   – ordered hashtable of action counts
-#   Errors   – list of error strings
-#   Skipped  – $true if the file was skipped entirely
+#   Counts   - ordered hashtable of action counts
+#   Errors   - list of error strings
+#   Skipped  - $true if the file was skipped entirely
 # ---------------------------------------------------------------------------
 function Invoke-ProcessWorkbook {
     param(
@@ -115,7 +115,7 @@ function Invoke-ProcessWorkbook {
     try {
         $workbook = $Excel.Workbooks.Open(
             $FilePath,
-            0,        # UpdateLinks – don't update
+            0,        # UpdateLinks - don't update
             $false,   # ReadOnly
             5,        # Format
             "",       # Password
@@ -138,7 +138,7 @@ function Invoke-ProcessWorkbook {
     Write-Log $ResultsFile "  Workbook opened successfully."
 
     # -----------------------------------------------------------------------
-    # STEP A – Remove external data connections
+    # STEP A - Remove external data connections
     # -----------------------------------------------------------------------
     Write-Log $ResultsFile "  --- External connections ---"
     try {
@@ -163,7 +163,7 @@ function Invoke-ProcessWorkbook {
     }
 
     # -----------------------------------------------------------------------
-    # STEP B – Remove externally-referencing named ranges
+    # STEP B - Remove externally-referencing named ranges
     # -----------------------------------------------------------------------
     Write-Log $ResultsFile "  --- External named ranges ---"
     try {
@@ -196,7 +196,7 @@ function Invoke-ProcessWorkbook {
     }
 
     # -----------------------------------------------------------------------
-    # STEP C – Catalogue sheet visibility
+    # STEP C - Catalogue sheet visibility
     # -----------------------------------------------------------------------
     $hiddenSheetNames     = @()
     $veryHiddenSheetNames = @()
@@ -225,7 +225,7 @@ function Invoke-ProcessWorkbook {
     Write-Log $ResultsFile "    Very-hidden sheets  : $($veryHiddenSheetNames.Count)  -> $($veryHiddenSheetNames -join ', ')"
 
     # -----------------------------------------------------------------------
-    # STEP D – Process each visible sheet
+    # STEP D - Process each visible sheet
     # -----------------------------------------------------------------------
     Write-Log $ResultsFile "  --- Processing visible sheets ---"
 
@@ -420,7 +420,7 @@ function Invoke-ProcessWorkbook {
     }
 
     # -----------------------------------------------------------------------
-    # STEP E – Delete hidden and very-hidden sheets
+    # STEP E - Delete hidden and very-hidden sheets
     # -----------------------------------------------------------------------
     Write-Log $ResultsFile "  --- Deleting hidden sheets ---"
     foreach ($shName in $hiddenSheetNames) {
@@ -451,7 +451,7 @@ function Invoke-ProcessWorkbook {
     }
 
     # -----------------------------------------------------------------------
-    # STEP F – QC pass
+    # STEP F - QC pass
     # -----------------------------------------------------------------------
     Write-Log $ResultsFile "  --- QC pass ---"
     $qcIssues = [System.Collections.Generic.List[string]]::new()
@@ -539,14 +539,14 @@ function Invoke-ProcessWorkbook {
     $counts["QC Issues Found After Processing"] = $qcIssues.Count
 
     if ($qcIssues.Count -eq 0) {
-        Write-Log $ResultsFile "    QC PASSED – No residual hidden content found."
+        Write-Log $ResultsFile "    QC PASSED - No residual hidden content found."
     } else {
         Write-Log $ResultsFile "    QC COMPLETED WITH $($qcIssues.Count) ISSUE(S). See details above."
         foreach ($qi in $qcIssues) { Write-ErrorLog $ErrorFile "    $qi" }
     }
 
     # -----------------------------------------------------------------------
-    # STEP G – Save Updated_ copy
+    # STEP G - Save Updated_ copy
     # -----------------------------------------------------------------------
     $updatedName = "Updated_" + $fileItem.Name
     $updatedPath = Join-Path $OutputDir $updatedName
@@ -581,7 +581,7 @@ function Invoke-ProcessWorkbook {
     }
 
     # -----------------------------------------------------------------------
-    # STEP H – Close workbook (don't save again)
+    # STEP H - Close workbook (don't save again)
     # -----------------------------------------------------------------------
     try { $workbook.Close($false) } catch {}
     Release-Com $workbook
@@ -605,7 +605,7 @@ function Invoke-ProcessWorkbook {
 
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  Flatten & Remove Hidden Information – Batch Mode"
+Write-Host "  Flatten & Remove Hidden Information - Batch Mode"
 Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "========================================================"
 Write-Host ""
@@ -656,7 +656,7 @@ $excelFiles | ForEach-Object { Write-Host "  - $($_.Name)" }
 Write-Host ""
 
 # ---------------------------------------------------------------------------
-# Build Output folder – one level above the source folder
+# Build Output folder - one level above the source folder
 # ---------------------------------------------------------------------------
 $parentDir = Split-Path $FolderPath -Parent
 $outputDir = Join-Path $parentDir "Output"
@@ -681,14 +681,14 @@ $runHeader = "=" * 60
 $runDate   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
 Set-Content -LiteralPath $resultsFile -Value $runHeader -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  Results – Flatten & Remove Hidden Information (Batch)" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Results - Flatten & Remove Hidden Information (Batch)" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Run date      : $runDate" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Source folder : $FolderPath" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Files found   : $($excelFiles.Count)" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value $runHeader -Encoding UTF8
 
 Set-Content -LiteralPath $errorFile -Value $runHeader -Encoding UTF8
-Add-Content -LiteralPath $errorFile -Value "  Error Log – Flatten & Remove Hidden Information (Batch)" -Encoding UTF8
+Add-Content -LiteralPath $errorFile -Value "  Error Log - Flatten & Remove Hidden Information (Batch)" -Encoding UTF8
 Add-Content -LiteralPath $errorFile -Value "  Run date      : $runDate" -Encoding UTF8
 Add-Content -LiteralPath $errorFile -Value "  Source folder : $FolderPath" -Encoding UTF8
 Add-Content -LiteralPath $errorFile -Value $runHeader -Encoding UTF8
