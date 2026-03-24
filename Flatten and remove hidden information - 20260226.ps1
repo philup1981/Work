@@ -756,7 +756,7 @@ foreach ($fileItem in $excelFiles) {
     } else {
         $filesProcessed++
         # Accumulate grand totals
-        foreach ($key in $grandTotals.Keys) {
+        foreach ($key in @($grandTotals.Keys)) {
             $grandTotals[$key] += $result.Counts[$key]
         }
     }
