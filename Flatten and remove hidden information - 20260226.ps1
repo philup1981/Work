@@ -1,171 +1,711 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Flattens Excel workbook content (pivot tables, charts, linked data) and removes hidden sheets/rows/columns.
+    Flattens Excel workbook content and removes hidden items across an entire folder of spreadsheets.
 
 .DESCRIPTION
-    This script:
+    Prompts the user for a folder path, then for every Excel file (.xlsx / .xlsm / .xls) found
+    directly in that folder:
       - Flattens all pivot tables to static values
-      - Flattens all charts to static images (embedded pictures)
+      - Converts chart objects to static images
       - Removes external data connections
-      - Removes hidden and very-hidden worksheets
-      - Removes hidden rows and columns in every visible sheet
+      - Removes named ranges referencing external workbooks
+      - Deletes hidden and very-hidden worksheets
+      - Removes hidden rows and columns (within used range)
       - Removes hidden ListObjects (tables)
-      - Runs a QC pass to confirm no residual hidden content
-      - Writes an updated workbook, Results.txt, and Error.txt to an Output folder
-        one level above the workbook's parent folder
+      - Runs a QC pass to verify no residual hidden content
+      - Saves an Updated_<filename> copy to an Output folder one level above the source folder
 
-.PARAMETER SpreadsheetPath
-    Full path (local or UNC) to the source Excel workbook.
+    A single Results.txt (per-file detail + grand total) and Error.txt are written to the Output folder.
 
-.EXAMPLE
-    .\<script>.ps1 -SpreadsheetPath "\\server\share\reports\MyBook.xlsx"
+.NOTES
+    - No external modules required.
+    - Runs under the account that launched the PowerShell terminal.
+    - Supports local and UNC/network paths.
 #>
 
 [CmdletBinding()]
-param(
-    [Parameter(Mandatory = $true, HelpMessage = "Full path to the Excel workbook (local or UNC).")]
-    [string]$SpreadsheetPath
-)
+param()   # No parameters – folder path is prompted interactively.
 
-# ---------------------------------------------------------------------------
-# Helper: append a timestamped line to a log file
-# ---------------------------------------------------------------------------
+Set-StrictMode -Off   # Allow unset variables without terminating.
+
+# ===========================================================================
+# HELPER FUNCTIONS
+# ===========================================================================
+
 function Write-Log {
-    param(
-        [string]$FilePath,
-        [string]$Message
-    )
-    $ts  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    $line = "[$ts] $Message"
+    param([string]$FilePath, [string]$Message)
+    $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
     Add-Content -LiteralPath $FilePath -Value $line -Encoding UTF8
     Write-Host $line
 }
 
-# ---------------------------------------------------------------------------
-# Helper: append to Error log and also write to host
-# ---------------------------------------------------------------------------
 function Write-ErrorLog {
-    param(
-        [string]$FilePath,
-        [string]$Message
-    )
-    $ts   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    $line = "[ERROR][$ts] $Message"
+    param([string]$FilePath, [string]$Message)
+    $line = "[ERROR][$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
     Add-Content -LiteralPath $FilePath -Value $line -Encoding UTF8
     Write-Warning $line
 }
 
-# ---------------------------------------------------------------------------
-# Counters (populated during processing)
-# ---------------------------------------------------------------------------
-$counts = [ordered]@{
-    "Pivot Tables Flattened"          = 0
-    "Charts Converted to Images"      = 0
-    "External Connections Removed"    = 0
-    "Named Ranges Pointing Externally Removed" = 0
-    "Hidden Sheets Removed"           = 0
-    "Very Hidden Sheets Removed"      = 0
-    "Hidden Rows Removed"             = 0
-    "Hidden Columns Removed"          = 0
-    "Hidden Tables (ListObjects) Removed" = 0
-    "QC Issues Found After Processing"= 0
+function Release-Com {
+    param($obj)
+    if ($null -ne $obj) {
+        try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($obj) | Out-Null } catch {}
+    }
 }
 
-$errorList = [System.Collections.Generic.List[string]]::new()
+function New-FileCounts {
+    # Returns a fresh ordered hashtable of counters for one file.
+    return [ordered]@{
+        "Pivot Tables Flattened"                   = 0
+        "Charts Converted to Images"               = 0
+        "External Connections Removed"             = 0
+        "Named Ranges Pointing Externally Removed" = 0
+        "Hidden Sheets Removed"                    = 0
+        "Very Hidden Sheets Removed"               = 0
+        "Hidden Rows Removed"                      = 0
+        "Hidden Columns Removed"                   = 0
+        "Hidden Tables (ListObjects) Removed"      = 0
+        "QC Issues Found After Processing"         = 0
+    }
+}
 
 # ---------------------------------------------------------------------------
-# STEP 1 – Resolve and validate the spreadsheet path
+# Processes a single workbook. Returns a hashtable with:
+#   Counts   – ordered hashtable of action counts
+#   Errors   – list of error strings
+#   Skipped  – $true if the file was skipped entirely
 # ---------------------------------------------------------------------------
+function Invoke-ProcessWorkbook {
+    param(
+        [object]$Excel,          # Live Excel COM application object
+        [string]$FilePath,       # Full path to source workbook
+        [string]$OutputDir,      # Destination folder for Updated_ file
+        [string]$ResultsFile,    # Path to Results.txt (already open for append)
+        [string]$ErrorFile       # Path to Error.txt  (already open for append)
+    )
+
+    $counts    = New-FileCounts
+    $errorList = [System.Collections.Generic.List[string]]::new()
+    $fileItem  = Get-Item -LiteralPath $FilePath
+
+    # Excel visibility constants
+    $xlSheetVisible    = -1
+    $xlSheetHidden     =  0
+    $xlSheetVeryHidden =  2
+
+    Write-Log $ResultsFile ""
+    Write-Log $ResultsFile ("=" * 60)
+    Write-Log $ResultsFile "  FILE: $($fileItem.Name)"
+    Write-Log $ResultsFile ("=" * 60)
+
+    # --- Verify read access before handing to Excel ---
+    try {
+        $fs = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'ReadWrite')
+        $fs.Close(); $fs.Dispose()
+    } catch {
+        $msg = "Cannot open '$FilePath' for reading. File may be locked or permissions denied. Details: $($_.Exception.Message)"
+        Write-ErrorLog $ErrorFile $msg
+        $errorList.Add($msg)
+        return @{ Counts = $counts; Errors = $errorList; Skipped = $true }
+    }
+
+    # --- Open workbook ---
+    $workbook = $null
+    try {
+        $workbook = $Excel.Workbooks.Open(
+            $FilePath,
+            0,        # UpdateLinks – don't update
+            $false,   # ReadOnly
+            5,        # Format
+            "",       # Password
+            "",       # WriteResPassword
+            $true,    # IgnoreReadOnlyRecommended
+            [System.Reflection.Missing]::Value,
+            [System.Reflection.Missing]::Value,
+            $false,
+            $false,
+            [System.Reflection.Missing]::Value,
+            $false
+        )
+    } catch {
+        $msg = "Failed to open workbook '$FilePath'. Details: $($_.Exception.Message)"
+        Write-ErrorLog $ErrorFile $msg
+        $errorList.Add($msg)
+        return @{ Counts = $counts; Errors = $errorList; Skipped = $true }
+    }
+
+    Write-Log $ResultsFile "  Workbook opened successfully."
+
+    # -----------------------------------------------------------------------
+    # STEP A – Remove external data connections
+    # -----------------------------------------------------------------------
+    Write-Log $ResultsFile "  --- External connections ---"
+    try {
+        $connCount = $workbook.Connections.Count
+        Write-Log $ResultsFile "    Found: $connCount"
+        for ($c = $connCount; $c -ge 1; $c--) {
+            try {
+                $conn = $workbook.Connections.Item($c)
+                $connName = $conn.Name
+                $conn.Delete()
+                $counts["External Connections Removed"]++
+                Write-Log $ResultsFile "    Removed connection: '$connName'"
+                Release-Com $conn
+            } catch {
+                $msg = "    Could not remove connection [$c]: $($_.Exception.Message)"
+                Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+            }
+        }
+    } catch {
+        $msg = "    Error enumerating connections: $($_.Exception.Message)"
+        Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+    }
+
+    # -----------------------------------------------------------------------
+    # STEP B – Remove externally-referencing named ranges
+    # -----------------------------------------------------------------------
+    Write-Log $ResultsFile "  --- External named ranges ---"
+    try {
+        $nameCount = $workbook.Names.Count
+        Write-Log $ResultsFile "    Named ranges found: $nameCount"
+        $externalNames = @()
+        for ($n = 1; $n -le $nameCount; $n++) {
+            try {
+                $nm = $workbook.Names.Item($n)
+                if ($nm.RefersTo -match '\[') { $externalNames += $nm.Name }
+                Release-Com $nm
+            } catch {}
+        }
+        Write-Log $ResultsFile "    External named ranges found: $($externalNames.Count)"
+        foreach ($eName in $externalNames) {
+            try {
+                $nm = $workbook.Names.Item($eName)
+                $nm.Delete()
+                $counts["Named Ranges Pointing Externally Removed"]++
+                Write-Log $ResultsFile "    Removed: '$eName'"
+                Release-Com $nm
+            } catch {
+                $msg = "    Could not remove named range '$eName': $($_.Exception.Message)"
+                Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+            }
+        }
+    } catch {
+        $msg = "    Error enumerating named ranges: $($_.Exception.Message)"
+        Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+    }
+
+    # -----------------------------------------------------------------------
+    # STEP C – Catalogue sheet visibility
+    # -----------------------------------------------------------------------
+    $hiddenSheetNames     = @()
+    $veryHiddenSheetNames = @()
+    $visibleSheetNames    = @()
+    $totalSheets          = $workbook.Sheets.Count
+
+    Write-Log $ResultsFile "  --- Sheet inventory (total: $totalSheets) ---"
+
+    for ($s = 1; $s -le $totalSheets; $s++) {
+        try {
+            $sh = $workbook.Sheets.Item($s)
+            switch ($sh.Visible) {
+                $xlSheetVisible    { $visibleSheetNames    += $sh.Name }
+                $xlSheetHidden     { $hiddenSheetNames     += $sh.Name }
+                $xlSheetVeryHidden { $veryHiddenSheetNames += $sh.Name }
+            }
+            Release-Com $sh
+        } catch {
+            $msg = "    Could not read sheet index $s visibility: $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+    }
+
+    Write-Log $ResultsFile "    Visible sheets      : $($visibleSheetNames.Count)  -> $($visibleSheetNames -join ', ')"
+    Write-Log $ResultsFile "    Hidden sheets       : $($hiddenSheetNames.Count)  -> $($hiddenSheetNames -join ', ')"
+    Write-Log $ResultsFile "    Very-hidden sheets  : $($veryHiddenSheetNames.Count)  -> $($veryHiddenSheetNames -join ', ')"
+
+    # -----------------------------------------------------------------------
+    # STEP D – Process each visible sheet
+    # -----------------------------------------------------------------------
+    Write-Log $ResultsFile "  --- Processing visible sheets ---"
+
+    foreach ($shName in $visibleSheetNames) {
+        Write-Log $ResultsFile "    >> Sheet: '$shName'"
+
+        $ws = $null
+        try {
+            $ws = $workbook.Sheets.Item($shName)
+        } catch {
+            $msg = "      Could not access sheet '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+            continue
+        }
+
+        # D1: Flatten pivot tables
+        try {
+            $ptCount = $ws.PivotTables().Count
+            Write-Log $ResultsFile "      Pivot tables found: $ptCount"
+            for ($p = $ptCount; $p -ge 1; $p--) {
+                try {
+                    $pt      = $ws.PivotTables($p)
+                    $ptName  = $pt.Name
+                    $ptRange = $pt.TableRange2
+
+                    $ptRange.Copy()
+                    $ptRange.PasteSpecial(-4163)   # xlPasteValues
+                    $pt.TableRange2.ClearContents()
+                    $ptRange.PasteSpecial(-4163)
+
+                    try {
+                        $ptObj = $ws.PivotTables($p)
+                        $ptObj.TableRange2.ClearOutline()
+                        $ptObj.TableRange1.Clear()
+                        $ptRange.PasteSpecial(-4163)
+                        Release-Com $ptObj
+                    } catch {}
+
+                    $counts["Pivot Tables Flattened"]++
+                    Write-Log $ResultsFile "      Flattened pivot table: '$ptName'"
+                    Release-Com $ptRange; Release-Com $pt
+                } catch {
+                    $msg = "      Error flattening pivot table $p in '$shName': $($_.Exception.Message)"
+                    Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                }
+            }
+        } catch {
+            $msg = "      Error accessing pivot tables in '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # D2: Convert charts to static images
+        try {
+            $coCount = $ws.ChartObjects().Count
+            Write-Log $ResultsFile "      Chart objects found: $coCount"
+            for ($ch = $coCount; $ch -ge 1; $ch--) {
+                try {
+                    $co     = $ws.ChartObjects($ch)
+                    $coName = $co.Name
+                    $coLeft = $co.Left; $coTop = $co.Top
+                    $coW    = $co.Width; $coH  = $co.Height
+
+                    $co.CopyPicture(1, -4147)   # xlScreen, xlPicture
+                    $ws.Paste()
+                    $Excel.CutCopyMode = $false
+
+                    $pic = $ws.Shapes.Item($ws.Shapes.Count)
+                    $pic.Left = $coLeft; $pic.Top  = $coTop
+                    $pic.Width= $coW;    $pic.Height= $coH
+                    Release-Com $pic
+
+                    $co.Delete()
+                    $counts["Charts Converted to Images"]++
+                    Write-Log $ResultsFile "      Converted chart to image: '$coName'"
+                    Release-Com $co
+                } catch {
+                    $msg = "      Error converting chart $ch in '$shName': $($_.Exception.Message)"
+                    Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                }
+            }
+        } catch {
+            $msg = "      Error accessing charts in '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # D3: Remove hidden rows
+        try {
+            $usedRange        = $ws.UsedRange
+            $firstRow         = $usedRange.Row
+            $lastRow          = $firstRow + $usedRange.Rows.Count - 1
+            $hiddenRowIndices = [System.Collections.Generic.List[int]]::new()
+
+            for ($r = $firstRow; $r -le $lastRow; $r++) {
+                try {
+                    $rObj = $ws.Rows.Item($r)
+                    if ($rObj.Hidden) { $hiddenRowIndices.Add($r) }
+                    Release-Com $rObj
+                } catch {}
+            }
+            Write-Log $ResultsFile "      Hidden rows found: $($hiddenRowIndices.Count)"
+            $hiddenRowIndices.Reverse()
+            foreach ($ri in $hiddenRowIndices) {
+                try {
+                    $rObj = $ws.Rows.Item($ri)
+                    $rObj.Delete()
+                    $counts["Hidden Rows Removed"]++
+                    Release-Com $rObj
+                } catch {
+                    $msg = "      Error deleting hidden row $ri in '$shName': $($_.Exception.Message)"
+                    Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                }
+            }
+            if ($hiddenRowIndices.Count -gt 0) {
+                Write-Log $ResultsFile "      Removed $($hiddenRowIndices.Count) hidden row(s)."
+            }
+            Release-Com $usedRange
+        } catch {
+            $msg = "      Error processing hidden rows in '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # D4: Remove hidden columns
+        try {
+            $usedRange        = $ws.UsedRange
+            $firstCol         = $usedRange.Column
+            $lastCol          = $firstCol + $usedRange.Columns.Count - 1
+            $hiddenColIndices = [System.Collections.Generic.List[int]]::new()
+
+            for ($c = $firstCol; $c -le $lastCol; $c++) {
+                try {
+                    $cObj = $ws.Columns.Item($c)
+                    if ($cObj.Hidden) { $hiddenColIndices.Add($c) }
+                    Release-Com $cObj
+                } catch {}
+            }
+            Write-Log $ResultsFile "      Hidden columns found: $($hiddenColIndices.Count)"
+            $hiddenColIndices.Reverse()
+            foreach ($ci in $hiddenColIndices) {
+                try {
+                    $cObj = $ws.Columns.Item($ci)
+                    $cObj.Delete()
+                    $counts["Hidden Columns Removed"]++
+                    Release-Com $cObj
+                } catch {
+                    $msg = "      Error deleting hidden column $ci in '$shName': $($_.Exception.Message)"
+                    Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                }
+            }
+            if ($hiddenColIndices.Count -gt 0) {
+                Write-Log $ResultsFile "      Removed $($hiddenColIndices.Count) hidden column(s)."
+            }
+            Release-Com $usedRange
+        } catch {
+            $msg = "      Error processing hidden columns in '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # D5: Remove hidden ListObjects (tables)
+        try {
+            $loCount     = $ws.ListObjects.Count
+            $hiddenTbls  = @()
+            Write-Log $ResultsFile "      ListObjects found: $loCount"
+            for ($lo = 1; $lo -le $loCount; $lo++) {
+                try {
+                    $loObj   = $ws.ListObjects.Item($lo)
+                    $loRange = $loObj.Range
+                    if ($loRange.EntireRow.Hidden -and $loRange.EntireColumn.Hidden) {
+                        $hiddenTbls += $loObj.Name
+                    }
+                    Release-Com $loRange; Release-Com $loObj
+                } catch {}
+            }
+            Write-Log $ResultsFile "      Hidden tables found: $($hiddenTbls.Count)"
+            foreach ($tblName in $hiddenTbls) {
+                try {
+                    $loObj = $ws.ListObjects.Item($tblName)
+                    $loObj.Delete()
+                    $counts["Hidden Tables (ListObjects) Removed"]++
+                    Write-Log $ResultsFile "      Removed hidden table: '$tblName'"
+                    Release-Com $loObj
+                } catch {
+                    $msg = "      Error removing table '$tblName' in '$shName': $($_.Exception.Message)"
+                    Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                }
+            }
+        } catch {
+            $msg = "      Error processing tables in '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        Release-Com $ws
+    }
+
+    # -----------------------------------------------------------------------
+    # STEP E – Delete hidden and very-hidden sheets
+    # -----------------------------------------------------------------------
+    Write-Log $ResultsFile "  --- Deleting hidden sheets ---"
+    foreach ($shName in $hiddenSheetNames) {
+        try {
+            $sh = $workbook.Sheets.Item($shName)
+            $sh.Visible = $xlSheetVisible
+            $sh.Delete()
+            $counts["Hidden Sheets Removed"]++
+            Write-Log $ResultsFile "    Deleted hidden sheet: '$shName'"
+            Release-Com $sh
+        } catch {
+            $msg = "    Error deleting hidden sheet '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+    }
+    foreach ($shName in $veryHiddenSheetNames) {
+        try {
+            $sh = $workbook.Sheets.Item($shName)
+            $sh.Visible = $xlSheetVisible
+            $sh.Delete()
+            $counts["Very Hidden Sheets Removed"]++
+            Write-Log $ResultsFile "    Deleted very-hidden sheet: '$shName'"
+            Release-Com $sh
+        } catch {
+            $msg = "    Error deleting very-hidden sheet '$shName': $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # STEP F – QC pass
+    # -----------------------------------------------------------------------
+    Write-Log $ResultsFile "  --- QC pass ---"
+    $qcIssues = [System.Collections.Generic.List[string]]::new()
+
+    # F1: Sheet visibility
+    for ($s = 1; $s -le $workbook.Sheets.Count; $s++) {
+        try {
+            $sh = $workbook.Sheets.Item($s)
+            if ($sh.Visible -ne $xlSheetVisible) {
+                $issue = "QC ISSUE: Sheet '$($sh.Name)' is still hidden (Visible=$($sh.Visible))."
+                $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
+            }
+            Release-Com $sh
+        } catch {}
+    }
+
+    # F2: Pivot tables, charts, hidden rows/cols on visible sheets
+    for ($s = 1; $s -le $workbook.Sheets.Count; $s++) {
+        try {
+            $sh = $workbook.Sheets.Item($s)
+            if ($sh.Visible -ne $xlSheetVisible) { Release-Com $sh; continue }
+            $shQC = $sh.Name
+
+            try {
+                $ptQC = $sh.PivotTables().Count
+                if ($ptQC -gt 0) {
+                    $issue = "QC ISSUE: Sheet '$shQC' still has $ptQC pivot table(s)."
+                    $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
+                }
+            } catch {}
+
+            try {
+                $coQC = $sh.ChartObjects().Count
+                if ($coQC -gt 0) {
+                    $issue = "QC ISSUE: Sheet '$shQC' still has $coQC chart object(s)."
+                    $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
+                }
+            } catch {}
+
+            try {
+                $ur     = $sh.UsedRange
+                $rStart = $ur.Row; $rEnd = $rStart + $ur.Rows.Count - 1
+                $hidR   = 0
+                for ($r = $rStart; $r -le $rEnd; $r++) {
+                    $rObj = $sh.Rows.Item($r)
+                    if ($rObj.Hidden) { $hidR++ }
+                    Release-Com $rObj
+                }
+                if ($hidR -gt 0) {
+                    $issue = "QC ISSUE: Sheet '$shQC' still has $hidR hidden row(s)."
+                    $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
+                }
+                Release-Com $ur
+            } catch {}
+
+            try {
+                $ur     = $sh.UsedRange
+                $cStart = $ur.Column; $cEnd = $cStart + $ur.Columns.Count - 1
+                $hidC   = 0
+                for ($c = $cStart; $c -le $cEnd; $c++) {
+                    $cObj = $sh.Columns.Item($c)
+                    if ($cObj.Hidden) { $hidC++ }
+                    Release-Com $cObj
+                }
+                if ($hidC -gt 0) {
+                    $issue = "QC ISSUE: Sheet '$shQC' still has $hidC hidden column(s)."
+                    $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
+                }
+                Release-Com $ur
+            } catch {}
+
+            Release-Com $sh
+        } catch {}
+    }
+
+    # F3: Connections
+    try {
+        $connQC = $workbook.Connections.Count
+        if ($connQC -gt 0) {
+            $issue = "QC ISSUE: Workbook still has $connQC external connection(s)."
+            $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
+        }
+    } catch {}
+
+    $counts["QC Issues Found After Processing"] = $qcIssues.Count
+
+    if ($qcIssues.Count -eq 0) {
+        Write-Log $ResultsFile "    QC PASSED – No residual hidden content found."
+    } else {
+        Write-Log $ResultsFile "    QC COMPLETED WITH $($qcIssues.Count) ISSUE(S). See details above."
+        foreach ($qi in $qcIssues) { Write-ErrorLog $ErrorFile "    $qi" }
+    }
+
+    # -----------------------------------------------------------------------
+    # STEP G – Save Updated_ copy
+    # -----------------------------------------------------------------------
+    $updatedName = "Updated_" + $fileItem.Name
+    $updatedPath = Join-Path $OutputDir $updatedName
+
+    Write-Log $ResultsFile "  --- Saving: $updatedPath ---"
+
+    try {
+        $ext = $fileItem.Extension.ToLower()
+        $xlFileFormat = switch ($ext) {
+            ".xlsx" { 51 }   # xlOpenXMLWorkbook
+            ".xlsm" { 52 }   # xlOpenXMLWorkbookMacroEnabled
+            ".xls"  { 56 }   # xlExcel8
+            default { 51 }
+        }
+
+        $workbook.SaveAs(
+            $updatedPath,
+            $xlFileFormat,
+            [System.Reflection.Missing]::Value,
+            [System.Reflection.Missing]::Value,
+            $false, $false, 1,
+            [System.Reflection.Missing]::Value,
+            $false,
+            [System.Reflection.Missing]::Value,
+            [System.Reflection.Missing]::Value,
+            $false
+        )
+        Write-Log $ResultsFile "  Saved successfully: $updatedPath"
+    } catch {
+        $msg = "  Could not save '$updatedPath'. Details: $($_.Exception.Message)"
+        Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+    }
+
+    # -----------------------------------------------------------------------
+    # STEP H – Close workbook (don't save again)
+    # -----------------------------------------------------------------------
+    try { $workbook.Close($false) } catch {}
+    Release-Com $workbook
+
+    # Per-file summary in results
+    Write-Log $ResultsFile "  --- File summary: $($fileItem.Name) ---"
+    $maxLen = ($counts.Keys | Measure-Object -Property Length -Maximum).Maximum
+    foreach ($key in $counts.Keys) {
+        $pad  = " " * ($maxLen - $key.Length)
+        $line = "    $key$pad : $($counts[$key])"
+        Add-Content -LiteralPath $ResultsFile -Value $line -Encoding UTF8
+        Write-Host $line
+    }
+
+    return @{ Counts = $counts; Errors = $errorList; Skipped = $false }
+}
+
+# ===========================================================================
+# MAIN SCRIPT BODY
+# ===========================================================================
+
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  Flatten & Remove Hidden Information"
+Write-Host "  Flatten & Remove Hidden Information – Batch Mode"
 Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "========================================================"
 Write-Host ""
 
-# Expand environment variables / relative paths
-try {
-    $SpreadsheetPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SpreadsheetPath)
-} catch {
-    Write-Warning "Could not resolve provided path '$SpreadsheetPath'. Proceeding with the path as given."
-}
+# ---------------------------------------------------------------------------
+# Prompt for folder path
+# ---------------------------------------------------------------------------
+do {
+    $FolderPath = (Read-Host "Enter the full path to the folder containing the spreadsheets").Trim()
 
-Write-Host "Spreadsheet path supplied : $SpreadsheetPath"
+    if ([string]::IsNullOrWhiteSpace($FolderPath)) {
+        Write-Warning "No path entered. Please try again."
+        continue
+    }
 
-# Does the file exist?
-if (-not (Test-Path -LiteralPath $SpreadsheetPath -PathType Leaf)) {
-    Write-Error "FATAL: The file '$SpreadsheetPath' does not exist or cannot be reached.`nVerify the path is correct and that network connectivity / drive mapping is in place."
+    # Resolve to absolute path (handles relative paths and env vars)
+    try {
+        $FolderPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($FolderPath)
+    } catch {
+        Write-Warning "Could not resolve path '$FolderPath'. Please enter a valid path."
+        $FolderPath = ""
+        continue
+    }
+
+    if (-not (Test-Path -LiteralPath $FolderPath -PathType Container)) {
+        Write-Warning "The path '$FolderPath' does not exist or is not a folder. Please try again."
+        $FolderPath = ""
+    }
+} while ([string]::IsNullOrWhiteSpace($FolderPath))
+
+Write-Host ""
+Write-Host "Source folder : $FolderPath"
+
+# ---------------------------------------------------------------------------
+# Discover Excel files
+# ---------------------------------------------------------------------------
+$excelFiles = @(Get-ChildItem -LiteralPath $FolderPath -File |
+    Where-Object { $_.Extension -match '^\.(xlsx|xlsm|xls)$' } |
+    Sort-Object Name)
+
+if ($excelFiles.Count -eq 0) {
+    Write-Error "No Excel files (.xlsx, .xlsm, .xls) found in '$FolderPath'. Nothing to process."
     exit 1
 }
 
-# Can we read it?
-try {
-    $null = [System.IO.File]::Open($SpreadsheetPath, 'Open', 'Read', 'ReadWrite')
-} catch {
-    Write-Error "FATAL: The file '$SpreadsheetPath' exists but cannot be opened for reading.`nCheck permissions or whether the file is exclusively locked by another process.`nDetails: $($_.Exception.Message)"
-    exit 1
-}
-
-# Resolve to a fully qualified path in case it's a UNC path passed as relative
-$SpreadsheetPath = (Get-Item -LiteralPath $SpreadsheetPath).FullName
-Write-Host "Resolved full path         : $SpreadsheetPath"
+Write-Host "Excel files found: $($excelFiles.Count)"
+$excelFiles | ForEach-Object { Write-Host "  - $($_.Name)" }
+Write-Host ""
 
 # ---------------------------------------------------------------------------
-# STEP 2 – Build output folder structure
+# Build Output folder – one level above the source folder
 # ---------------------------------------------------------------------------
-$fileItem       = Get-Item -LiteralPath $SpreadsheetPath
-$fileDir        = $fileItem.DirectoryName          # e.g. \\server\share\reports
-$parentDir      = Split-Path $fileDir -Parent       # one level above
-$outputDir      = Join-Path $parentDir "Output"
+$parentDir = Split-Path $FolderPath -Parent
+$outputDir = Join-Path $parentDir "Output"
 
-Write-Host "Output directory           : $outputDir"
+Write-Host "Output directory: $outputDir"
 
 if (-not (Test-Path -LiteralPath $outputDir)) {
     try {
         New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-        Write-Host "Created output directory   : $outputDir"
+        Write-Host "Created output directory: $outputDir"
     } catch {
-        Write-Error "FATAL: Could not create output directory '$outputDir'.`nDetails: $($_.Exception.Message)"
+        Write-Error "FATAL: Could not create output directory '$outputDir'. Details: $($_.Exception.Message)"
         exit 1
     }
 }
 
-$resultsFile    = Join-Path $outputDir "Results.txt"
-$errorFile      = Join-Path $outputDir "Error.txt"
-$updatedName    = "Updated_" + $fileItem.Name
-$updatedPath    = Join-Path $outputDir $updatedName
+$resultsFile = Join-Path $outputDir "Results.txt"
+$errorFile   = Join-Path $outputDir "Error.txt"
 
-# Initialise/clear log files for this run
+# Initialise log files
 $runHeader = "=" * 60
-Set-Content -LiteralPath $resultsFile -Value $runHeader          -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  Results – Flatten & Remove Hidden Information"  -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  Run date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  Source   : $SpreadsheetPath" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value $runHeader          -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value ""                  -Encoding UTF8
+$runDate   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 
-Set-Content -LiteralPath $errorFile   -Value $runHeader          -Encoding UTF8
-Add-Content -LiteralPath $errorFile   -Value "  Error Log – Flatten & Remove Hidden Information" -Encoding UTF8
-Add-Content -LiteralPath $errorFile   -Value "  Run date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Encoding UTF8
-Add-Content -LiteralPath $errorFile   -Value "  Source   : $SpreadsheetPath" -Encoding UTF8
-Add-Content -LiteralPath $errorFile   -Value $runHeader          -Encoding UTF8
-Add-Content -LiteralPath $errorFile   -Value ""                  -Encoding UTF8
+Set-Content -LiteralPath $resultsFile -Value $runHeader -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Results – Flatten & Remove Hidden Information (Batch)" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Run date      : $runDate" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Source folder : $FolderPath" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Files found   : $($excelFiles.Count)" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value $runHeader -Encoding UTF8
 
-Write-Log $resultsFile "Processing started."
+Set-Content -LiteralPath $errorFile -Value $runHeader -Encoding UTF8
+Add-Content -LiteralPath $errorFile -Value "  Error Log – Flatten & Remove Hidden Information (Batch)" -Encoding UTF8
+Add-Content -LiteralPath $errorFile -Value "  Run date      : $runDate" -Encoding UTF8
+Add-Content -LiteralPath $errorFile -Value "  Source folder : $FolderPath" -Encoding UTF8
+Add-Content -LiteralPath $errorFile -Value $runHeader -Encoding UTF8
+
+Write-Log $resultsFile "Batch processing started. Files to process: $($excelFiles.Count)"
 
 # ---------------------------------------------------------------------------
-# STEP 3 – Launch Excel via COM (under the current user account)
+# Launch Excel once for the entire batch
 # ---------------------------------------------------------------------------
-Write-Log $resultsFile "Launching Microsoft Excel via COM automation (current user context)."
+Write-Log $resultsFile "Launching Microsoft Excel COM (current user context)."
 
 $excel = $null
 try {
     $excel = New-Object -ComObject Excel.Application
 } catch {
-    $msg = "FATAL: Could not create an Excel COM object. Is Microsoft Excel installed for the current user?`nDetails: $($_.Exception.Message)"
+    $msg = "FATAL: Could not create Excel COM object. Is Microsoft Excel installed? Details: $($_.Exception.Message)"
     Write-ErrorLog $errorFile $msg
-    Add-Content -LiteralPath $errorFile -Value $msg -Encoding UTF8
     Write-Error $msg
     exit 1
 }
@@ -175,655 +715,106 @@ $excel.DisplayAlerts         = $false
 $excel.AskToUpdateLinks      = $false
 $excel.AlertBeforeOverwriting = $false
 
-Write-Log $resultsFile "Excel COM object created successfully."
+Write-Log $resultsFile "Excel COM object ready."
 
 # ---------------------------------------------------------------------------
-# STEP 4 – Open workbook
+# Initialise grand-total counters
 # ---------------------------------------------------------------------------
-$workbook = $null
-try {
-    # UpdateLinks=0 (don't update), ReadOnly=false, Format=5 (default)
-    $workbook = $excel.Workbooks.Open(
-        $SpreadsheetPath,   # Filename
-        0,                  # UpdateLinks  – 0 = don't update
-        $false,             # ReadOnly
-        5,                  # Format       – 5 = nothing special
-        "",                 # Password
-        "",                 # WriteResPassword
-        $true,              # IgnoreReadOnlyRecommended
-        [System.Reflection.Missing]::Value,  # Origin
-        [System.Reflection.Missing]::Value,  # Delimiter
-        $false,             # Editable
-        $false,             # Notify
-        [System.Reflection.Missing]::Value,  # Converter
-        $false              # AddToMru
-    )
-} catch {
-    $msg = "FATAL: Could not open workbook '$SpreadsheetPath'.`nDetails: $($_.Exception.Message)"
-    Write-ErrorLog $errorFile $msg
-    if ($excel) { $excel.Quit(); [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null }
-    Write-Error $msg
-    exit 1
-}
-
-Write-Log $resultsFile "Workbook opened: $($workbook.FullName)"
+$grandTotals      = New-FileCounts
+$skippedFiles     = [System.Collections.Generic.List[string]]::new()
+$allErrors        = [System.Collections.Generic.List[string]]::new()
+$filesProcessed   = 0
 
 # ---------------------------------------------------------------------------
-# Helper: release a COM object safely
+# Process each file
 # ---------------------------------------------------------------------------
-function Release-Com {
-    param($obj)
-    if ($null -ne $obj) {
-        try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($obj) | Out-Null } catch {}
+$fileIndex = 0
+foreach ($fileItem in $excelFiles) {
+    $fileIndex++
+    Write-Host ""
+    Write-Host "[$fileIndex / $($excelFiles.Count)] Processing: $($fileItem.Name)"
+
+    $result = Invoke-ProcessWorkbook `
+        -Excel       $excel `
+        -FilePath    $fileItem.FullName `
+        -OutputDir   $outputDir `
+        -ResultsFile $resultsFile `
+        -ErrorFile   $errorFile
+
+    if ($result.Skipped) {
+        $skippedFiles.Add($fileItem.Name)
+        Write-Log $resultsFile "  !! SKIPPED: $($fileItem.Name)"
+    } else {
+        $filesProcessed++
+        # Accumulate grand totals
+        foreach ($key in $grandTotals.Keys) {
+            $grandTotals[$key] += $result.Counts[$key]
+        }
     }
+
+    foreach ($e in $result.Errors) { $allErrors.Add($e) }
+
+    # Collect garbage between files to free COM memory
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
 }
 
-# ===========================================================================
-# STEP 5 – Remove external data connections
-# ===========================================================================
-Write-Log $resultsFile "--- Removing external data connections ---"
-
-try {
-    $connCount = $workbook.Connections.Count
-    Write-Log $resultsFile "  Found $connCount connection(s) in workbook."
-    for ($c = $connCount; $c -ge 1; $c--) {
-        try {
-            $conn = $workbook.Connections.Item($c)
-            $connName = $conn.Name
-            $conn.Delete()
-            $counts["External Connections Removed"]++
-            Write-Log $resultsFile "  Removed connection [$c]: '$connName'"
-            Release-Com $conn
-        } catch {
-            $msg = "  Could not remove connection [$c]: $($_.Exception.Message)"
-            Write-ErrorLog $errorFile $msg
-            $errorList.Add($msg)
-        }
-    }
-} catch {
-    $msg = "Error enumerating workbook connections: $($_.Exception.Message)"
-    Write-ErrorLog $errorFile $msg
-    $errorList.Add($msg)
-}
-
-# ===========================================================================
-# STEP 6 – Remove external named ranges / names
-# ===========================================================================
-Write-Log $resultsFile "--- Checking workbook-level Names for external references ---"
-
-try {
-    $nameCount = $workbook.Names.Count
-    Write-Log $resultsFile "  Found $nameCount named range(s) in workbook."
-    $externalNames = @()
-    for ($n = 1; $n -le $nameCount; $n++) {
-        try {
-            $nm = $workbook.Names.Item($n)
-            $ref = $nm.RefersTo
-            # External references contain '[' (workbook name in brackets)
-            if ($ref -match '\[') {
-                $externalNames += $nm.Name
-            }
-            Release-Com $nm
-        } catch {}
-    }
-    foreach ($eName in $externalNames) {
-        try {
-            $nm = $workbook.Names.Item($eName)
-            $nm.Delete()
-            $counts["Named Ranges Pointing Externally Removed"]++
-            Write-Log $resultsFile "  Removed external named range: '$eName'"
-            Release-Com $nm
-        } catch {
-            $msg = "  Could not remove named range '$eName': $($_.Exception.Message)"
-            Write-ErrorLog $errorFile $msg
-            $errorList.Add($msg)
-        }
-    }
-} catch {
-    $msg = "Error enumerating named ranges: $($_.Exception.Message)"
-    Write-ErrorLog $errorFile $msg
-    $errorList.Add($msg)
-}
-
-# ===========================================================================
-# STEP 7 – Process each worksheet
-# ===========================================================================
-Write-Log $resultsFile "--- Processing worksheets ---"
-
-# Excel sheet visibility constants
-$xlSheetVisible    = -1   # xlSheetVisible
-$xlSheetHidden     =  0   # xlSheetHidden
-$xlSheetVeryHidden =  2   # xlSheetVeryHidden
-
-# Collect hidden sheets first (iterate by index to allow deletion)
-$hiddenSheetNames     = @()
-$veryHiddenSheetNames = @()
-
-$totalSheets = $workbook.Sheets.Count
-Write-Log $resultsFile "  Total sheets in workbook: $totalSheets"
-
-for ($s = 1; $s -le $totalSheets; $s++) {
-    try {
-        $sh = $workbook.Sheets.Item($s)
-        switch ($sh.Visible) {
-            $xlSheetHidden     { $hiddenSheetNames     += $sh.Name }
-            $xlSheetVeryHidden { $veryHiddenSheetNames += $sh.Name }
-        }
-        Release-Com $sh
-    } catch {
-        $msg = "  Could not read visibility of sheet index $s: $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-}
-
-Write-Log $resultsFile "  Hidden sheets found      : $($hiddenSheetNames.Count)  -> $($hiddenSheetNames -join ', ')"
-Write-Log $resultsFile "  Very-hidden sheets found : $($veryHiddenSheetNames.Count)  -> $($veryHiddenSheetNames -join ', ')"
-
-# We must keep at least one visible sheet – collect all visible sheet names
-$visibleSheetNames = @()
-for ($s = 1; $s -le $totalSheets; $s++) {
-    try {
-        $sh = $workbook.Sheets.Item($s)
-        if ($sh.Visible -eq $xlSheetVisible) { $visibleSheetNames += $sh.Name }
-        Release-Com $sh
-    } catch {}
-}
-
-# ----- Process visible sheets: flatten pivot tables, charts, hidden rows/cols -----
-Write-Log $resultsFile "  Processing visible sheets for pivot tables, charts, hidden rows/columns..."
-
-foreach ($shName in $visibleSheetNames) {
-    Write-Log $resultsFile "  >> Sheet: '$shName'"
-
-    $ws = $null
-    try {
-        $ws = $workbook.Sheets.Item($shName)
-    } catch {
-        $msg = "    Could not access sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-        continue
-    }
-
-    # ---- 7a: Flatten Pivot Tables ----
-    try {
-        $ptCount = $ws.PivotTables().Count
-        Write-Log $resultsFile "    Pivot tables found: $ptCount"
-
-        for ($p = $ptCount; $p -ge 1; $p--) {
-            try {
-                $pt        = $ws.PivotTables($p)
-                $ptName    = $pt.Name
-                $ptRange   = $pt.TableRange2  # full pivot table range incl. page fields
-
-                # Copy the range to clipboard then paste as values
-                $ptRange.Copy()
-                $ptRange.PasteSpecial(-4163)  # xlPasteValues = -4163
-
-                # Delete the pivot cache / pivot table object
-                $pt.TableRange2.ClearContents()
-                # Paste values back
-                $ptRange.PasteSpecial(-4163)
-
-                # The pivot table object still exists until we delete the PivotCache
-                # Safest: re-fetch pivot table and delete it
-                try {
-                    $ptObj = $ws.PivotTables($p)
-                    $cache = $ptObj.PivotCache()
-                    $ptObj.TableRange2.ClearOutline()
-                    # Remove the pivot table (leaves values in place)
-                    $ptObj.TableRange1.Clear()      # clear the actual pivot
-                    # Repaste values from clipboard
-                    $ptRange.PasteSpecial(-4163)
-                    Release-Com $ptObj
-                    Release-Com $cache
-                } catch {}
-
-                $counts["Pivot Tables Flattened"]++
-                Write-Log $resultsFile "    Flattened pivot table '$ptName' in sheet '$shName'."
-                Release-Com $ptRange
-                Release-Com $pt
-            } catch {
-                $msg = "    Error flattening pivot table $p in sheet '$shName': $($_.Exception.Message)"
-                Write-ErrorLog $errorFile $msg
-                $errorList.Add($msg)
-            }
-        }
-    } catch {
-        $msg = "    Error accessing pivot tables in sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-
-    # ---- 7b: Flatten Charts (ChartObjects) to static images ----
-    try {
-        $coCount = $ws.ChartObjects().Count
-        Write-Log $resultsFile "    Chart objects found: $coCount"
-
-        for ($ch = $coCount; $ch -ge 1; $ch--) {
-            try {
-                $co      = $ws.ChartObjects($ch)
-                $coName  = $co.Name
-                $coLeft  = $co.Left
-                $coTop   = $co.Top
-                $coW     = $co.Width
-                $coH     = $co.Height
-
-                # Copy the chart as a picture to clipboard
-                $co.CopyPicture(1, -4147)  # Appearance=xlScreen=1, Format=xlPicture=-4147
-
-                # Paste as picture on the sheet
-                $ws.Paste()
-                $excel.CutCopyMode = $false  # clear clipboard
-
-                # Reposition the pasted picture to the same location
-                # The pasted picture is the last shape added
-                $shapeCount = $ws.Shapes.Count
-                $pic = $ws.Shapes.Item($shapeCount)
-                $pic.Left  = $coLeft
-                $pic.Top   = $coTop
-                $pic.Width = $coW
-                $pic.Height= $coH
-
-                Release-Com $pic
-
-                # Delete the original chart object
-                $co.Delete()
-                $counts["Charts Converted to Images"]++
-                Write-Log $resultsFile "    Converted chart '$coName' to static image in sheet '$shName'."
-                Release-Com $co
-            } catch {
-                $msg = "    Error converting chart $ch in sheet '$shName': $($_.Exception.Message)"
-                Write-ErrorLog $errorFile $msg
-                $errorList.Add($msg)
-            }
-        }
-    } catch {
-        $msg = "    Error accessing charts in sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-
-    # ---- 7c: Remove hidden rows ----
-    try {
-        $usedRange = $ws.UsedRange
-        $rowCount  = $usedRange.Rows.Count
-        $firstRow  = $usedRange.Row
-        $hiddenRowCount = 0
-
-        # Build a list of hidden row indices (1-based worksheet rows)
-        $hiddenRowIndices = [System.Collections.Generic.List[int]]::new()
-        for ($r = $firstRow; $r -lt ($firstRow + $rowCount); $r++) {
-            try {
-                $rowObj = $ws.Rows.Item($r)
-                if ($rowObj.Hidden -eq $true) {
-                    $hiddenRowIndices.Add($r)
-                }
-                Release-Com $rowObj
-            } catch {}
-        }
-
-        Write-Log $resultsFile "    Hidden rows found in used range: $($hiddenRowIndices.Count)"
-
-        # Delete in reverse order so indices don't shift
-        $hiddenRowIndices.Reverse()
-        foreach ($ri in $hiddenRowIndices) {
-            try {
-                $rowObj = $ws.Rows.Item($ri)
-                $rowObj.Delete()
-                $counts["Hidden Rows Removed"]++
-                $hiddenRowCount++
-                Release-Com $rowObj
-            } catch {
-                $msg = "    Error deleting hidden row $ri in sheet '$shName': $($_.Exception.Message)"
-                Write-ErrorLog $errorFile $msg
-                $errorList.Add($msg)
-            }
-        }
-        if ($hiddenRowCount -gt 0) {
-            Write-Log $resultsFile "    Removed $hiddenRowCount hidden row(s) from sheet '$shName'."
-        }
-        Release-Com $usedRange
-    } catch {
-        $msg = "    Error processing hidden rows in sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-
-    # ---- 7d: Remove hidden columns ----
-    try {
-        $usedRange = $ws.UsedRange
-        $colCount  = $usedRange.Columns.Count
-        $firstCol  = $usedRange.Column
-        $hiddenColCount = 0
-
-        $hiddenColIndices = [System.Collections.Generic.List[int]]::new()
-        for ($c = $firstCol; $c -lt ($firstCol + $colCount); $c++) {
-            try {
-                $colObj = $ws.Columns.Item($c)
-                if ($colObj.Hidden -eq $true) {
-                    $hiddenColIndices.Add($c)
-                }
-                Release-Com $colObj
-            } catch {}
-        }
-
-        Write-Log $resultsFile "    Hidden columns found in used range: $($hiddenColIndices.Count)"
-
-        $hiddenColIndices.Reverse()
-        foreach ($ci in $hiddenColIndices) {
-            try {
-                $colObj = $ws.Columns.Item($ci)
-                $colObj.Delete()
-                $counts["Hidden Columns Removed"]++
-                $hiddenColCount++
-                Release-Com $colObj
-            } catch {
-                $msg = "    Error deleting hidden column $ci in sheet '$shName': $($_.Exception.Message)"
-                Write-ErrorLog $errorFile $msg
-                $errorList.Add($msg)
-            }
-        }
-        if ($hiddenColCount -gt 0) {
-            Write-Log $resultsFile "    Removed $hiddenColCount hidden column(s) from sheet '$shName'."
-        }
-        Release-Com $usedRange
-    } catch {
-        $msg = "    Error processing hidden columns in sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-
-    # ---- 7e: Remove hidden ListObjects (Tables) ----
-    try {
-        $loCount = $ws.ListObjects.Count
-        Write-Log $resultsFile "    ListObjects (tables) found: $loCount"
-
-        $hiddenTables = @()
-        for ($lo = 1; $lo -le $loCount; $lo++) {
-            try {
-                $loObj = $ws.ListObjects.Item($lo)
-                # A ListObject is considered "hidden" if its ShowHeaders and ShowTotals
-                # are both false AND it has no visible display range – or if every row/col
-                # it occupies is hidden. We'll treat any table whose entire range is
-                # within hidden rows/cols as hidden.
-                $loRange = $loObj.Range
-                $entirelyHidden = $loRange.EntireRow.Hidden -and $loRange.EntireColumn.Hidden
-                if ($entirelyHidden) {
-                    $hiddenTables += $loObj.Name
-                }
-                Release-Com $loRange
-                Release-Com $loObj
-            } catch {}
-        }
-
-        foreach ($tblName in $hiddenTables) {
-            try {
-                $loObj = $ws.ListObjects.Item($tblName)
-                $loObj.Delete()
-                $counts["Hidden Tables (ListObjects) Removed"]++
-                Write-Log $resultsFile "    Removed hidden table '$tblName' in sheet '$shName'."
-                Release-Com $loObj
-            } catch {
-                $msg = "    Error removing hidden table '$tblName' in sheet '$shName': $($_.Exception.Message)"
-                Write-ErrorLog $errorFile $msg
-                $errorList.Add($msg)
-            }
-        }
-    } catch {
-        $msg = "    Error processing ListObjects in sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-
-    Release-Com $ws
-}
-
-# ----- Remove hidden sheets (after processing visible ones) -----
-Write-Log $resultsFile "--- Removing hidden sheets ---"
-
-foreach ($shName in $hiddenSheetNames) {
-    try {
-        $sh = $workbook.Sheets.Item($shName)
-        $sh.Visible = $xlSheetVisible   # must be visible before delete
-        $sh.Delete()
-        $counts["Hidden Sheets Removed"]++
-        Write-Log $resultsFile "  Deleted hidden sheet: '$shName'"
-        Release-Com $sh
-    } catch {
-        $msg = "  Error deleting hidden sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-}
-
-foreach ($shName in $veryHiddenSheetNames) {
-    try {
-        $sh = $workbook.Sheets.Item($shName)
-        $sh.Visible = $xlSheetVisible
-        $sh.Delete()
-        $counts["Very Hidden Sheets Removed"]++
-        Write-Log $resultsFile "  Deleted very-hidden sheet: '$shName'"
-        Release-Com $sh
-    } catch {
-        $msg = "  Error deleting very-hidden sheet '$shName': $($_.Exception.Message)"
-        Write-ErrorLog $errorFile $msg
-        $errorList.Add($msg)
-    }
-}
-
-# ===========================================================================
-# STEP 8 – QC Pass: verify no residual hidden content
-# ===========================================================================
-Write-Log $resultsFile "--- QC Pass: checking for residual hidden content ---"
-$qcIssues = [System.Collections.Generic.List[string]]::new()
-
-# QC: sheets
-$sheetCountQC = $workbook.Sheets.Count
-for ($s = 1; $s -le $sheetCountQC; $s++) {
-    try {
-        $sh = $workbook.Sheets.Item($s)
-        if ($sh.Visible -ne $xlSheetVisible) {
-            $issue = "QC ISSUE: Sheet '$($sh.Name)' is still hidden (Visible=$($sh.Visible))."
-            $qcIssues.Add($issue)
-            Write-Log $resultsFile "  $issue"
-        }
-        Release-Com $sh
-    } catch {}
-}
-
-# QC: pivot tables, charts, hidden rows/cols on remaining visible sheets
-$sheetCountQC2 = $workbook.Sheets.Count
-for ($s = 1; $s -le $sheetCountQC2; $s++) {
-    try {
-        $sh = $workbook.Sheets.Item($s)
-        if ($sh.Visible -ne $xlSheetVisible) { Release-Com $sh; continue }
-        $shNameQC = $sh.Name
-
-        # Pivot tables
-        try {
-            $ptQC = $sh.PivotTables().Count
-            if ($ptQC -gt 0) {
-                $issue = "QC ISSUE: Sheet '$shNameQC' still contains $ptQC pivot table(s)."
-                $qcIssues.Add($issue)
-                Write-Log $resultsFile "  $issue"
-            }
-        } catch {}
-
-        # Charts
-        try {
-            $coQC = $sh.ChartObjects().Count
-            if ($coQC -gt 0) {
-                $issue = "QC ISSUE: Sheet '$shNameQC' still contains $coQC chart object(s)."
-                $qcIssues.Add($issue)
-                Write-Log $resultsFile "  $issue"
-            }
-        } catch {}
-
-        # Hidden rows
-        try {
-            $ur = $sh.UsedRange
-            $rStart = $ur.Row
-            $rEnd   = $rStart + $ur.Rows.Count - 1
-            $hidR   = 0
-            for ($r = $rStart; $r -le $rEnd; $r++) {
-                $rObj = $sh.Rows.Item($r)
-                if ($rObj.Hidden) { $hidR++ }
-                Release-Com $rObj
-            }
-            if ($hidR -gt 0) {
-                $issue = "QC ISSUE: Sheet '$shNameQC' still has $hidR hidden row(s)."
-                $qcIssues.Add($issue)
-                Write-Log $resultsFile "  $issue"
-            }
-            Release-Com $ur
-        } catch {}
-
-        # Hidden columns
-        try {
-            $ur = $sh.UsedRange
-            $cStart = $ur.Column
-            $cEnd   = $cStart + $ur.Columns.Count - 1
-            $hidC   = 0
-            for ($c = $cStart; $c -le $cEnd; $c++) {
-                $cObj = $sh.Columns.Item($c)
-                if ($cObj.Hidden) { $hidC++ }
-                Release-Com $cObj
-            }
-            if ($hidC -gt 0) {
-                $issue = "QC ISSUE: Sheet '$shNameQC' still has $hidC hidden column(s)."
-                $qcIssues.Add($issue)
-                Write-Log $resultsFile "  $issue"
-            }
-            Release-Com $ur
-        } catch {}
-
-        Release-Com $sh
-    } catch {}
-}
-
-# QC: connections
-try {
-    $connQC = $workbook.Connections.Count
-    if ($connQC -gt 0) {
-        $issue = "QC ISSUE: Workbook still has $connQC external connection(s)."
-        $qcIssues.Add($issue)
-        Write-Log $resultsFile "  $issue"
-    }
-} catch {}
-
-$counts["QC Issues Found After Processing"] = $qcIssues.Count
-
-if ($qcIssues.Count -eq 0) {
-    Write-Log $resultsFile "  QC PASSED – No residual hidden content found."
-} else {
-    Write-Log $resultsFile "  QC COMPLETED WITH $($qcIssues.Count) ISSUE(S). See details above."
-    foreach ($qi in $qcIssues) {
-        Write-ErrorLog $errorFile "  $qi"
-    }
-}
-
-# ===========================================================================
-# STEP 9 – Save updated workbook
-# ===========================================================================
-Write-Log $resultsFile "--- Saving updated workbook ---"
-Write-Log $resultsFile "  Destination: $updatedPath"
-
-try {
-    # Determine file format from extension
-    $ext = $fileItem.Extension.ToLower()
-    $xlOpenXML    = 51   # xlsx
-    $xlOpenXMLMacro = 52 # xlsm
-    $xlExcel8     = 56   # xls (Excel 97-2003)
-    $xlFileFormat = switch ($ext) {
-        ".xlsx" { $xlOpenXML }
-        ".xlsm" { $xlOpenXMLMacro }
-        ".xls"  { $xlExcel8 }
-        default { $xlOpenXML }
-    }
-
-    $workbook.SaveAs(
-        $updatedPath,
-        $xlFileFormat,
-        [System.Reflection.Missing]::Value,  # Password
-        [System.Reflection.Missing]::Value,  # WriteResPassword
-        $false,                              # ReadOnlyRecommended
-        $false,                              # CreateBackup
-        1,                                   # AccessMode = xlExclusive
-        [System.Reflection.Missing]::Value,  # ConflictResolution
-        $false,                              # AddToMru
-        [System.Reflection.Missing]::Value,  # TextCodepage
-        [System.Reflection.Missing]::Value,  # TextVisualLayout
-        $false                               # Local
-    )
-    Write-Log $resultsFile "  Workbook saved successfully: $updatedPath"
-} catch {
-    $msg = "FATAL: Could not save updated workbook to '$updatedPath'.`nDetails: $($_.Exception.Message)"
-    Write-ErrorLog $errorFile $msg
-    $errorList.Add($msg)
-    Write-Error $msg
-}
-
-# ===========================================================================
-# STEP 10 – Close workbook and quit Excel
-# ===========================================================================
-try {
-    $workbook.Close($false)
-    Release-Com $workbook
-} catch {}
-try {
-    $excel.Quit()
-    Release-Com $excel
-} catch {}
-
-# Force garbage collection to release COM objects
+# ---------------------------------------------------------------------------
+# Quit Excel
+# ---------------------------------------------------------------------------
+try { $excel.Quit() } catch {}
+Release-Com $excel
 [System.GC]::Collect()
 [System.GC]::WaitForPendingFinalizers()
 [System.GC]::Collect()
 
 Write-Log $resultsFile "Excel closed."
 
-# ===========================================================================
-# STEP 11 – Write summary counts to Results.txt
-# ===========================================================================
-Write-Log $resultsFile ""
-Add-Content -LiteralPath $resultsFile -Value "------------------------------------------------------------" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  SUMMARY OF ACTIONS" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "------------------------------------------------------------" -Encoding UTF8
+# ---------------------------------------------------------------------------
+# Grand-total summary in Results.txt
+# ---------------------------------------------------------------------------
+Add-Content -LiteralPath $resultsFile -Value "" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value ("=" * 60) -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  GRAND TOTAL SUMMARY" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Files in folder  : $($excelFiles.Count)" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Files processed  : $filesProcessed" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Files skipped    : $($skippedFiles.Count)  -> $($skippedFiles -join ', ')" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value ("=" * 60) -Encoding UTF8
 
-$maxLen = ($counts.Keys | Measure-Object -Property Length -Maximum).Maximum
-foreach ($key in $counts.Keys) {
-    $padding = " " * ($maxLen - $key.Length)
-    $line = "  $key$padding : $($counts[$key])"
+$maxLen = ($grandTotals.Keys | Measure-Object -Property Length -Maximum).Maximum
+foreach ($key in $grandTotals.Keys) {
+    $pad  = " " * ($maxLen - $key.Length)
+    $line = "  $key$pad : $($grandTotals[$key])"
     Add-Content -LiteralPath $resultsFile -Value $line -Encoding UTF8
     Write-Host $line
 }
 
 Add-Content -LiteralPath $resultsFile -Value "" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  Output files:" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "    Updated workbook : $updatedPath" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "    Results log      : $resultsFile" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "    Error log        : $errorFile" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Output location : $outputDir" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Results log     : $resultsFile" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Error log       : $errorFile" -Encoding UTF8
 
-# Write any errors to Error.txt
-if ($errorList.Count -gt 0) {
+# Error.txt footer
+if ($allErrors.Count -gt 0) {
     Add-Content -LiteralPath $errorFile -Value "" -Encoding UTF8
-    Add-Content -LiteralPath $errorFile -Value "------------------------------------------------------------" -Encoding UTF8
-    Add-Content -LiteralPath $errorFile -Value "  ERRORS ENCOUNTERED ($($errorList.Count) total)" -Encoding UTF8
-    Add-Content -LiteralPath $errorFile -Value "------------------------------------------------------------" -Encoding UTF8
-    foreach ($e in $errorList) {
+    Add-Content -LiteralPath $errorFile -Value ("=" * 60) -Encoding UTF8
+    Add-Content -LiteralPath $errorFile -Value "  ERRORS ENCOUNTERED ACROSS ALL FILES ($($allErrors.Count) total)" -Encoding UTF8
+    Add-Content -LiteralPath $errorFile -Value ("=" * 60) -Encoding UTF8
+    foreach ($e in $allErrors) {
         Add-Content -LiteralPath $errorFile -Value "  $e" -Encoding UTF8
     }
 } else {
+    Add-Content -LiteralPath $errorFile -Value "" -Encoding UTF8
     Add-Content -LiteralPath $errorFile -Value "  No errors encountered during this run." -Encoding UTF8
 }
 
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  Processing complete."
-Write-Host "  Updated workbook : $updatedPath"
-Write-Host "  Results log      : $resultsFile"
-Write-Host "  Error log        : $errorFile"
+Write-Host "  Batch complete."
+Write-Host "  Files processed : $filesProcessed / $($excelFiles.Count)"
+Write-Host "  Files skipped   : $($skippedFiles.Count)"
+Write-Host "  Output folder   : $outputDir"
+Write-Host "  Results log     : $resultsFile"
+Write-Host "  Error log       : $errorFile"
 Write-Host "========================================================"
 Write-Host ""
