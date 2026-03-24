@@ -293,7 +293,6 @@ function Invoke-ProcessWorkbook {
             $usedRng = $ws.UsedRange
             $usedRng.Copy()
             $usedRng.PasteSpecial(-4163)               # xlPasteValues — replaces every formula with its result
-            $Excel.CutCopyMode = 0
             $counts["Formulas Flattened"]++
             Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
