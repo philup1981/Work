@@ -291,23 +291,11 @@ function Invoke-ProcessWorkbook {
         # D2: Flatten remaining formulas to static values
         try {
             $usedRng = $ws.UsedRange
-            # Count formula cells for logging (SpecialCells throws when none exist)
-            $formulaCount = 0
-            try {
-                $formulaCells = $usedRng.SpecialCells(-4123)   # xlCellTypeFormulas
-                $formulaCount = $formulaCells.Count
-                Release-Com $formulaCells
-            } catch {}
-            Write-Log $ResultsFile "      Formulas found: $formulaCount"
-            if ($formulaCount -gt 0) {
-                # Paste values over the entire UsedRange (always contiguous — avoids
-                # the non-contiguous-range limitation of PasteSpecial on SpecialCells)
-                $usedRng.Copy()
-                $usedRng.PasteSpecial(-4163)                   # xlPasteValues
-                $Excel.CutCopyMode = $false
-                $counts["Formulas Flattened"] += $formulaCount
-                Write-Log $ResultsFile "      Formulas flattened: $formulaCount"
-            }
+            $usedRng.Copy()
+            $usedRng.PasteSpecial(-4163)               # xlPasteValues — replaces every formula with its result
+            $Excel.CutCopyMode = $false
+            $counts["Formulas Flattened"]++
+            Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
         } catch {
             $msg = "      Error flattening formulas in '$shName': $($_.Exception.Message)"
