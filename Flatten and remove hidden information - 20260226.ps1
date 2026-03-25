@@ -340,7 +340,9 @@ function Invoke-ProcessWorkbook {
 
                     $co.CopyPicture(1, -4147)   # xlScreen, xlPicture
                     $ws.Paste()
-                    $Excel.CutCopyMode = $false   # $false cancels copy mode; 0 is not a valid XlCutCopyMode enum value
+                    # Note: do NOT set $Excel.CutCopyMode here — the property only accepts
+                    # xlCopy/xlCut enum values; clearing it is unnecessary in automation
+                    # (DisplayAlerts=false suppresses any clipboard prompt on exit).
 
                     $pic = $ws.Shapes.Item($ws.Shapes.Count)
                     $pic.Left = $coLeft; $pic.Top  = $coTop
