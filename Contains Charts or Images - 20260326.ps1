@@ -200,13 +200,11 @@ function Get-OoxmlContent {
     param([System.IO.FileInfo]$File)
 
     $r = [PSCustomObject]@{
-        HasChart    = $false; HasImage   = $false; HasSmartArt = $false
-        ChartCount  = 0;      ImageCount = 0;      DrawingCount = 0
+        HasChart    = $false; HasImage   = $false; HasSmartArt = $false; HasShape = $false
+        ChartCount  = 0;      ImageCount = 0;      DrawingCount = 0;    ShapeCount = 0
         SmartArtCnt = 0;      Details    = [System.Collections.Generic.List[string]]::new()
         Error       = $null
     }
-
-    $stream = $null; $zip = $null
     try {
         $stream = [System.IO.File]::Open($File.FullName,
                     [System.IO.FileMode]::Open,
@@ -279,6 +277,15 @@ function Get-OoxmlContent {
                     $r.HasChart = $true
                     $r.Details.Add("Chart reference in: $df")
                 }
+                # Shapes: <xdr:sp> = basic shape (rect/arrow/callout/text box etc.)
+                #         <xdr:cxnSp> = connector/line shape
+                if ($xml -match '<xdr:sp[\s>]|<xdr:cxnSp[\s>]') {
+                    $r.HasShape  = $true
+                    $spCnt  = ([regex]::Matches($xml, '<xdr:sp[\s>]')).Count
+                    $cxnCnt = ([regex]::Matches($xml, '<xdr:cxnSp[\s>]')).Count
+                    $r.ShapeCount += $spCnt + $cxnCnt
+                    $r.Details.Add("Shapes in $df`: sp=$spCnt connectors=$cxnCnt")
+                }
             } catch {
                 $r.Details.Add("WARNING: Could not read drawing '$df': $($_.Exception.Message)")
             }
@@ -325,8 +332,8 @@ function Get-BinaryXlsContent {
     param([System.IO.FileInfo]$File)
 
     $r = [PSCustomObject]@{
-        HasChart    = $false; HasImage   = $false; HasSmartArt = $false
-        ChartCount  = 0;      ImageCount = 0;      DrawingCount = 0
+        HasChart    = $false; HasImage   = $false; HasSmartArt = $false; HasShape = $false
+        ChartCount  = 0;      ImageCount = 0;      DrawingCount = 0;    ShapeCount = 0
         SmartArtCnt = 0;      Details    = [System.Collections.Generic.List[string]]::new()
         Error       = $null
     }
@@ -402,14 +409,28 @@ function Get-BinaryXlsContent {
 
         if ($msoDrw -gt 0) {
             $r.DrawingCount = $msoDrw
-            $r.Details.Add("MSODRAWING records: $msoDrw")
-            if ($chartBof -eq 0) { $r.HasImage = $true }
-            elseif (($msoDrw - $chartBof) -gt 0 -or $imdata -gt 0) { $r.HasImage = $true }
+            $r.Details.Add("MSODRAWING records: $msoDrw (covers charts, images and shapes in binary format)")
+            # IMDATA records confirm actual embedded image data
+            if ($imdata -gt 0) { $r.HasImage = $true }
+            # Chart BOF confirms embedded charts
+            # Any remaining MSODRAWING records beyond confirmed charts/images are shapes
+            $remainingDrw = $msoDrw - $chartBof
+            if ($remainingDrw -gt 0) {
+                # In BIFF8 we cannot reliably distinguish images from shapes without
+                # full OLE2 sector parsing, so flag both as potentially present
+                $r.HasShape = $true
+                $r.ShapeCount = $remainingDrw
+                $r.Details.Add("Drawing objects (shapes/images) inferred from MSODRAWING: $remainingDrw")
+                # If IMDATA is also present, images are confirmed; otherwise classify as shapes
+                if ($imdata -eq 0) {
+                    $r.Details.Add("No IMDATA records found - drawing objects classified as shapes (may include images)")
+                }
+            }
         }
         if ($msoDrwGrp -gt 0) { $r.Details.Add("MSODRAWINGGROUP records: $msoDrwGrp") }
 
         $r.ChartCount  = $chartBof
-        $r.ImageCount  = if ($imdata -gt 0) { $imdata } else { [Math]::Max(0, $msoDrw - $chartBof) }
+        $r.ImageCount  = $imdata
         $r.Details.Add("Binary scan totals - MSODRAWING:$msoDrw | MSODRAWINGGROUP:$msoDrwGrp | ChartBOF:$chartBof | IMDATA:$imdata")
 
     } catch {
@@ -511,8 +532,8 @@ $WorkerScript = {
     if ($OoxmlExts  -contains $Ext) { return Get-OoxmlContent     -File $f }
     if ($BinaryExts -contains $Ext) { return Get-BinaryXlsContent -File $f }
     return [PSCustomObject]@{
-        HasChart=$false; HasImage=$false; HasSmartArt=$false
-        ChartCount=0; ImageCount=0; DrawingCount=0; SmartArtCnt=0
+        HasChart=$false; HasImage=$false; HasSmartArt=$false; HasShape=$false
+        ChartCount=0; ImageCount=0; DrawingCount=0; ShapeCount=0; SmartArtCnt=0
         Details=[System.Collections.Generic.List[string]]::new()
         Error="Unsupported extension: $Ext"
     }
@@ -536,7 +557,7 @@ for ($i = 0; $i -lt $cTotal; $i++) {
         Log-Error "[$idx] $($file.FullName)" 'FILE_NOT_FOUND' $err
         $Results.Add([PSCustomObject]@{
             Index=$idx; File=$file; Category='review'
-            HasChart=$false; HasImage=$false; ChartCount=0; ImageCount=0; DrawingCount=0
+            HasChart=$false; HasImage=$false; HasShape=$false; ChartCount=0; ImageCount=0; ShapeCount=0; DrawingCount=0
             Details=@(); Error=$err; CopiedTo=$null
         })
         $cReview++; continue
@@ -553,7 +574,7 @@ for ($i = 0; $i -lt $cTotal; $i++) {
         Log-Error "[$idx] $($file.FullName)" 'ACCESS_DENIED' $err
         $Results.Add([PSCustomObject]@{
             Index=$idx; File=$file; Category='review'
-            HasChart=$false; HasImage=$false; ChartCount=0; ImageCount=0; DrawingCount=0
+            HasChart=$false; HasImage=$false; HasShape=$false; ChartCount=0; ImageCount=0; ShapeCount=0; DrawingCount=0
             Details=@(); Error=$err; CopiedTo=$null
         })
         $cReview++; continue
@@ -612,8 +633,8 @@ while ($pending.Count -gt 0) {
             Index      = $job.Index
             File       = $job.File
             Category   = 'review'
-            HasChart   = $false; HasImage = $false
-            ChartCount = 0;      ImageCount = 0; DrawingCount = 0
+            HasChart   = $false; HasImage = $false; HasShape = $false
+            ChartCount = 0;      ImageCount = 0;    ShapeCount = 0; DrawingCount = 0
             Details    = @()
             Error      = $null
             CopiedTo   = $null
@@ -633,16 +654,19 @@ while ($pending.Count -gt 0) {
 
         $rec.HasChart     = $a.HasChart
         $rec.HasImage     = $a.HasImage
+        $rec.HasShape     = $a.HasShape
         $rec.ChartCount   = $a.ChartCount
         $rec.ImageCount   = $a.ImageCount
+        $rec.ShapeCount   = $a.ShapeCount
         $rec.DrawingCount = $a.DrawingCount
         $rec.Details      = @($a.Details)
 
-        $hasContent   = $a.HasChart -or $a.HasImage -or $a.HasSmartArt
+        $hasContent   = $a.HasChart -or $a.HasImage -or $a.HasSmartArt -or $a.HasShape
         $rec.Category = if ($hasContent) { 'Has content' } else { 'Does not have content' }
 
         Write-Log "  Charts   : $($a.ChartCount)"   -L INFO
         Write-Log "  Images   : $($a.ImageCount)"   -L INFO
+        Write-Log "  Shapes   : $($a.ShapeCount)"   -L INFO
         Write-Log "  Drawings : $($a.DrawingCount)" -L INFO
         Write-Log "  SmartArt : $($a.SmartArtCnt)"  -L INFO
         $_lvl = if ($hasContent) { 'OK' } else { 'INFO' }
@@ -729,12 +753,13 @@ for ($q = 0; $q -lt $qcTotal; $q++) {
         $qcErr++; continue
     }
 
-    $qaHas    = $qa.HasChart -or $qa.HasImage -or $qa.HasSmartArt
+    $qaHas    = $qa.HasChart -or $qa.HasImage -or $qa.HasSmartArt -or $qa.HasShape
     $origHas  = ($rec.Category -eq 'Has content')
     $qaLabel  = if ($qaHas) { 'Has content' } else { 'Does not have content' }
 
     Write-Log "  QC Charts  : $($qa.ChartCount)" -L INFO
     Write-Log "  QC Images  : $($qa.ImageCount)" -L INFO
+    Write-Log "  QC Shapes  : $($qa.ShapeCount)" -L INFO
     Write-Log "  QC Result  : $qaLabel"          -L INFO
 
     if ($qaHas -ne $origHas) {
@@ -742,7 +767,7 @@ for ($q = 0; $q -lt $qcTotal; $q++) {
         Write-Log "  !! MISMATCH: was '$($rec.Category)' -> QC says '$qaLabel'" -L WARN
         Write-Log "  Moving to 'review'..." -L WARN
         Log-Error "[QC_MISMATCH] $($rec.File.Name)" 'QC_MISMATCH' `
-            "Pass1='$($rec.Category)' QC='$qaLabel' Charts:$($rec.ChartCount)->$($qa.ChartCount) Images:$($rec.ImageCount)->$($qa.ImageCount)"
+            "Pass1='$($rec.Category)' QC='$qaLabel' Charts:$($rec.ChartCount)->$($qa.ChartCount) Images:$($rec.ImageCount)->$($qa.ImageCount) Shapes:$($rec.ShapeCount)->$($qa.ShapeCount)"
 
         $dest = $null
         try {
@@ -836,6 +861,7 @@ $Duration  = $ScriptEnd - $ScriptStart
 
 $tCharts   = ($Results | Where-Object { $_.Category -ne 'review' } | Measure-Object -Property ChartCount  -Sum).Sum
 $tImages   = ($Results | Where-Object { $_.Category -ne 'review' } | Measure-Object -Property ImageCount  -Sum).Sum
+$tShapes   = ($Results | Where-Object { $_.Category -ne 'review' } | Measure-Object -Property ShapeCount  -Sum).Sum
 $tDrawings = ($Results | Where-Object { $_.Category -ne 'review' } | Measure-Object -Property DrawingCount -Sum).Sum
 
 Write-Log '' ; Write-Log ('=' * 70) -L HEAD
@@ -855,7 +881,8 @@ Write-Log ''
 Write-Log "  --- Content Totals (Pass 1) ---" -L HEAD
 Write-Log "  Charts found             : $tCharts"   -L INFO
 Write-Log "  Images found             : $tImages"   -L INFO
-Write-Log "  Drawing objects          : $tDrawings" -L INFO
+Write-Log "  Shapes found             : $tShapes"   -L INFO
+Write-Log "  Drawing objects (total)  : $tDrawings" -L INFO
 Write-Log ''
 Write-Log "  --- QC Results ---" -L HEAD
 Write-Log "  Files QC-checked         : $qcTotal"    -L INFO
