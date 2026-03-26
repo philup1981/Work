@@ -774,20 +774,25 @@ Write-Host ""
 # ---------------------------------------------------------------------------
 # Build Output folder - one level above the source folder
 # ---------------------------------------------------------------------------
-$parentDir = Split-Path $FolderPath -Parent
-$outputDir = Join-Path $parentDir "Output"
+$parentDir   = Split-Path $FolderPath -Parent
+$outputDir   = Join-Path $parentDir "Output"
+$passedDir   = Join-Path $outputDir "Passed"
+$failedQcDir = Join-Path $outputDir "Failed_QC"
 
-Write-Host "Output directory: $outputDir"
-
-if (-not (Test-Path -LiteralPath $outputDir)) {
-    try {
-        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
-        Write-Host "Created output directory: $outputDir"
-    } catch {
-        Write-Error "FATAL: Could not create output directory '$outputDir'. Details: $($_.Exception.Message)"
-        exit 1
+foreach ($dir in @($outputDir, $passedDir, $failedQcDir)) {
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Write-Host "Created: $dir"
+        } catch {
+            Write-Error "FATAL: Could not create directory '$dir'. Details: $($_.Exception.Message)"
+            exit 1
+        }
     }
 }
+
+Write-Host "Output (passed)  : $passedDir"
+Write-Host "Output (failed)  : $failedQcDir"
 
 $resultsFile = Join-Path $outputDir "Results.txt"
 $errorFile   = Join-Path $outputDir "Error.txt"
@@ -818,7 +823,7 @@ Write-Log $resultsFile "Launching Microsoft Excel COM (current user context)."
 
 $excel = $null
 try {
-    $excel = New-Object -ComObject Excel.Application
+    $excel = New-ExcelInstance
 } catch {
     $msg = "FATAL: Could not create Excel COM object. Is Microsoft Excel installed? Details: $($_.Exception.Message)"
     Write-ErrorLog $errorFile $msg
@@ -826,12 +831,7 @@ try {
     exit 1
 }
 
-$excel.Visible               = $false
-$excel.DisplayAlerts         = $false
-$excel.AskToUpdateLinks      = $false
-$excel.AlertBeforeOverwriting = $false
-
-Write-Log $resultsFile "Excel COM object ready."
+Write-Log $resultsFile "Excel COM object ready. AutomationSecurity=ForceDisable (macros suppressed on open)."
 
 # ---------------------------------------------------------------------------
 # Initialise grand-total counters
@@ -840,6 +840,8 @@ $grandTotals      = New-FileCounts
 $skippedFiles     = [System.Collections.Generic.List[string]]::new()
 $allErrors        = [System.Collections.Generic.List[string]]::new()
 $filesProcessed   = 0
+$qcFailedFiles    = [System.Collections.Generic.List[string]]::new()
+$batchStart       = [datetime]::UtcNow
 
 # ---------------------------------------------------------------------------
 # Process each file
@@ -847,13 +849,37 @@ $filesProcessed   = 0
 $fileIndex = 0
 foreach ($fileItem in $excelFiles) {
     $fileIndex++
+    $pct     = [math]::Round($fileIndex / $excelFiles.Count * 100, 1)
+    $elapsed = ([datetime]::UtcNow - $batchStart).TotalSeconds
+    $eta     = if ($fileIndex -gt 1) {
+                   $secsPerFile = $elapsed / ($fileIndex - 1)
+                   $remaining   = [int]($secsPerFile * ($excelFiles.Count - $fileIndex + 1))
+                   "ETA ~${remaining}s"
+               } else { "ETA calculating..." }
+
     Write-Host ""
-    Write-Host "[$fileIndex / $($excelFiles.Count)] Processing: $($fileItem.Name)"
+    Write-Host "[$fileIndex / $($excelFiles.Count)] ($pct%)  $($fileItem.Name)  —  $eta"
+
+    # Restart Excel every $ExcelRestartInterval files to release COM memory pressure
+    if ($fileIndex -gt 1 -and (($fileIndex - 1) % $ExcelRestartInterval) -eq 0) {
+        Write-Log $resultsFile "Restarting Excel COM after $($fileIndex - 1) files (memory management)."
+        try { $excel.Quit() } catch {}
+        Release-Com $excel
+        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()
+        try {
+            $excel = New-ExcelInstance
+            Write-Log $resultsFile "Excel COM restarted successfully."
+        } catch {
+            $msg = "FATAL: Could not restart Excel COM at file $fileIndex. Aborting."
+            Write-ErrorLog $errorFile $msg; Write-Error $msg; break
+        }
+    }
 
     $result = Invoke-ProcessWorkbook `
         -Excel       $excel `
         -FilePath    $fileItem.FullName `
-        -OutputDir   $outputDir `
+        -PassedDir   $passedDir `
+        -FailedQcDir $failedQcDir `
         -ResultsFile $resultsFile `
         -ErrorFile   $errorFile
 
@@ -862,15 +888,14 @@ foreach ($fileItem in $excelFiles) {
         Write-Log $resultsFile "  !! SKIPPED: $($fileItem.Name)"
     } else {
         $filesProcessed++
-        # Accumulate grand totals
         foreach ($key in @($grandTotals.Keys)) {
             $grandTotals[$key] += $result.Counts[$key]
         }
+        if ($result.QcFailed) { $qcFailedFiles.Add($fileItem.Name) }
     }
 
     foreach ($e in $result.Errors) { $allErrors.Add($e) }
 
-    # Collect garbage between files to free COM memory
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
 }
@@ -889,12 +914,17 @@ Write-Log $resultsFile "Excel closed."
 # ---------------------------------------------------------------------------
 # Grand-total summary in Results.txt
 # ---------------------------------------------------------------------------
+$totalElapsed = [math]::Round(([datetime]::UtcNow - $batchStart).TotalSeconds)
+
 Add-Content -LiteralPath $resultsFile -Value "" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value ("=" * 60) -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  GRAND TOTAL SUMMARY" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Files in folder  : $($excelFiles.Count)" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Files processed  : $filesProcessed" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Files skipped    : $($skippedFiles.Count)  -> $($skippedFiles -join ', ')" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  QC passed        : $($filesProcessed - $qcFailedFiles.Count)" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  QC failed        : $($qcFailedFiles.Count)  -> $($qcFailedFiles -join ', ')" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Total elapsed    : ${totalElapsed}s" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value ("=" * 60) -Encoding UTF8
 
 $maxLen = ($grandTotals.Keys | Measure-Object -Property Length -Maximum).Maximum
@@ -906,7 +936,8 @@ foreach ($key in $grandTotals.Keys) {
 }
 
 Add-Content -LiteralPath $resultsFile -Value "" -Encoding UTF8
-Add-Content -LiteralPath $resultsFile -Value "  Output location : $outputDir" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Output (passed) : $passedDir" -Encoding UTF8
+Add-Content -LiteralPath $resultsFile -Value "  Output (failed) : $failedQcDir" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Results log     : $resultsFile" -Encoding UTF8
 Add-Content -LiteralPath $resultsFile -Value "  Error log       : $errorFile" -Encoding UTF8
 
@@ -927,10 +958,12 @@ if ($allErrors.Count -gt 0) {
 Write-Host ""
 Write-Host "========================================================"
 Write-Host "  Batch complete."
-Write-Host "  Files processed : $filesProcessed / $($excelFiles.Count)"
-Write-Host "  Files skipped   : $($skippedFiles.Count)"
-Write-Host "  Output folder   : $outputDir"
-Write-Host "  Results log     : $resultsFile"
-Write-Host "  Error log       : $errorFile"
+Write-Host "  Total elapsed    : ${totalElapsed}s"
+Write-Host "  Files processed  : $filesProcessed / $($excelFiles.Count)"
+Write-Host "  Files skipped    : $($skippedFiles.Count)"
+Write-Host "  QC passed        : $($filesProcessed - $qcFailedFiles.Count)  -> $passedDir"
+Write-Host "  QC failed        : $($qcFailedFiles.Count)  -> $failedQcDir"
+Write-Host "  Results log      : $resultsFile"
+Write-Host "  Error log        : $errorFile"
 Write-Host "========================================================"
 Write-Host ""
