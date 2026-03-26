@@ -19,9 +19,26 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true, HelpMessage = "Path to folder containing spreadsheets.")]
+    [Parameter(Mandatory = $false)]
     [string]$FolderPath
 )
+
+# ============================================================
+#  INTERACTIVE PATH PROMPT
+# ============================================================
+if ([string]::IsNullOrWhiteSpace($FolderPath)) {
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor White
+    Write-Host '  Contains Charts or Images - 20260326' -ForegroundColor White
+    Write-Host '============================================================' -ForegroundColor White
+    Write-Host ''
+    Write-Host '  Enter the path to the folder containing your spreadsheets.' -ForegroundColor Cyan
+    Write-Host '  Local example : C:\Finance\Reports' -ForegroundColor DarkGray
+    Write-Host '  Network example: \\server\share\Reports' -ForegroundColor DarkGray
+    Write-Host ''
+    $FolderPath = (Read-Host '  Folder path').Trim()
+    Write-Host ''
+}
 
 Set-StrictMode -Off
 $ErrorActionPreference = 'Continue'
