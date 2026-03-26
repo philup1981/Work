@@ -6,28 +6,36 @@
 .DESCRIPTION
     Prompts the user for a folder path, then for every Excel file (.xlsx / .xlsm / .xls) found
     directly in that folder:
-      - Flattens all pivot tables to static values
-      - Converts chart objects to static images
+      - Flattens all pivot tables to static values (cell highlights and formatting preserved)
+      - Converts chart objects to static images (position and size preserved)
       - Removes external data connections
       - Removes named ranges referencing external workbooks
+      - Strips VBA macros from macro-enabled workbooks (.xlsm); output saved as .xlsx
       - Deletes hidden and very-hidden worksheets
       - Removes hidden rows and columns (within used range)
       - Removes hidden ListObjects (tables)
       - Runs a QC pass to verify no residual hidden content
-      - Saves an Updated_<filename> copy to an Output folder one level above the source folder
+      - Saves cleaned files to Output\Passed\ (QC passed) or Output\Failed_QC\ (QC issues),
+        using the original filename (macro-enabled files are saved with .xlsx extension)
 
-    A single Results.txt (per-file detail + grand total) and Error.txt are written to the Output folder.
+    Results.txt (per-file detail + grand totals) and Error.txt are written to the Output folder.
+    Excel COM is restarted every 25 files to prevent memory pressure on large batches (100+ files).
 
 .NOTES
     - No external modules required.
     - Runs under the account that launched the PowerShell terminal.
     - Supports local and UNC/network paths.
+    - "Trust access to the VBA project object model" (Excel Trust Center) enables in-place VBA
+      stripping; if unavailable, saving as .xlsx eliminates all macros regardless.
 #>
 
 [CmdletBinding()]
 param()   # No parameters - folder path is prompted interactively.
 
 Set-StrictMode -Off   # Allow unset variables without terminating.
+
+# Restart Excel COM every this many files to prevent memory buildup on large batches.
+$ExcelRestartInterval = 25
 
 # ===========================================================================
 # HELPER FUNCTIONS
@@ -54,12 +62,23 @@ function Release-Com {
     }
 }
 
+function New-ExcelInstance {
+    $xl = New-Object -ComObject Excel.Application
+    $xl.Visible                = $false
+    $xl.DisplayAlerts          = $false
+    $xl.AskToUpdateLinks       = $false
+    $xl.AlertBeforeOverwriting = $false
+    $xl.AutomationSecurity     = 3   # msoAutomationSecurityForceDisable — prevents macros running on open
+    return $xl
+}
+
 function New-FileCounts {
     # Returns a fresh ordered hashtable of counters for one file.
     return [ordered]@{
         "Pivot Tables Flattened"                   = 0
         "Formulas Flattened"                       = 0
         "Charts Converted to Images"               = 0
+        "Macro Modules Removed"                    = 0
         "External Connections Removed"             = 0
         "Named Ranges Pointing Externally Removed" = 0
         "Hidden Sheets Removed"                    = 0
@@ -81,7 +100,8 @@ function Invoke-ProcessWorkbook {
     param(
         [object]$Excel,          # Live Excel COM application object
         [string]$FilePath,       # Full path to source workbook
-        [string]$OutputDir,      # Destination folder for Updated_ file
+        [string]$PassedDir,      # Output\Passed\ — files that pass QC
+        [string]$FailedQcDir,    # Output\Failed_QC\ — files with QC issues
         [string]$ResultsFile,    # Path to Results.txt (already open for append)
         [string]$ErrorFile       # Path to Error.txt  (already open for append)
     )
@@ -89,6 +109,7 @@ function Invoke-ProcessWorkbook {
     $counts    = New-FileCounts
     $errorList = [System.Collections.Generic.List[string]]::new()
     $fileItem  = Get-Item -LiteralPath $FilePath
+    $isMacroFile = $fileItem.Extension.ToLower() -eq ".xlsm"
 
     # Excel visibility constants
     $xlSheetVisible    = -1
@@ -97,7 +118,7 @@ function Invoke-ProcessWorkbook {
 
     Write-Log $ResultsFile ""
     Write-Log $ResultsFile ("=" * 60)
-    Write-Log $ResultsFile "  FILE: $($fileItem.Name)"
+    Write-Log $ResultsFile "  FILE: $($fileItem.Name)$(if ($isMacroFile) { '  [macro-enabled .xlsm]' })"
     Write-Log $ResultsFile ("=" * 60)
 
     # --- Verify read access before handing to Excel ---
@@ -108,7 +129,7 @@ function Invoke-ProcessWorkbook {
         $msg = "Cannot open '$FilePath' for reading. File may be locked or permissions denied. Details: $($_.Exception.Message)"
         Write-ErrorLog $ErrorFile $msg
         $errorList.Add($msg)
-        return @{ Counts = $counts; Errors = $errorList; Skipped = $true }
+        return @{ Counts = $counts; Errors = $errorList; Skipped = $true; QcFailed = $false }
     }
 
     # --- Open workbook ---
@@ -133,7 +154,7 @@ function Invoke-ProcessWorkbook {
         $msg = "Failed to open workbook '$FilePath'. Details: $($_.Exception.Message)"
         Write-ErrorLog $ErrorFile $msg
         $errorList.Add($msg)
-        return @{ Counts = $counts; Errors = $errorList; Skipped = $true }
+        return @{ Counts = $counts; Errors = $errorList; Skipped = $true; QcFailed = $false }
     }
 
     Write-Log $ResultsFile "  Workbook opened successfully."
@@ -594,28 +615,70 @@ function Invoke-ProcessWorkbook {
         Write-Log $ResultsFile "    QC PASSED - No residual hidden content found."
     } else {
         Write-Log $ResultsFile "    QC COMPLETED WITH $($qcIssues.Count) ISSUE(S). See details above."
-        foreach ($qi in $qcIssues) { Write-ErrorLog $ErrorFile "    $qi" }
+        foreach ($qi in $qcIssues) { Write-ErrorLog $ErrorFile "    [$($fileItem.Name)] $qi" }
     }
 
     # -----------------------------------------------------------------------
-    # STEP G - Save Updated_ copy
+    # STEP G0 - Strip VBA macros from macro-enabled workbooks (.xlsm)
     # -----------------------------------------------------------------------
-    $updatedName = "Updated_" + $fileItem.Name
-    $updatedPath = Join-Path $OutputDir $updatedName
+    if ($isMacroFile) {
+        Write-Log $ResultsFile "  --- Stripping VBA macros (.xlsm) ---"
+        try {
+            $vbp      = $workbook.VBProject
+            # vbext_pp_locked = 1 means the VBProject is password-protected
+            if ($vbp.Protection -eq 1) {
+                Write-Log $ResultsFile "    VBProject is password-protected; macros will be eliminated by saving as .xlsx"
+            } else {
+                $vbComps      = $vbp.VBComponents
+                $removedCount = 0
+                for ($vi = $vbComps.Count; $vi -ge 1; $vi--) {
+                    try {
+                        $vbc = $vbComps.Item($vi)
+                        # vbext_ct_Document (type 100) = sheet/workbook module — cannot remove, clear code only
+                        if ($vbc.Type -eq 100) {
+                            $cm = $vbc.CodeModule
+                            if ($cm.CountOfLines -gt 0) {
+                                $cm.DeleteLines(1, $cm.CountOfLines)
+                                $removedCount++
+                            }
+                        } else {
+                            $vbComps.Remove($vbc)
+                            $removedCount++
+                        }
+                    } catch {}
+                }
+                $counts["Macro Modules Removed"] += $removedCount
+                Write-Log $ResultsFile "    Stripped $removedCount VBA component(s) via VBProject"
+            }
+        } catch {
+            # VBProject access requires 'Trust access to the VBA project object model' in Trust Center.
+            # If unavailable, saving as .xlsx below is the fallback guarantee.
+            Write-Log $ResultsFile "    VBProject access unavailable (Trust Center setting required); macros eliminated by saving as .xlsx"
+        }
+    }
 
-    Write-Log $ResultsFile "  --- Saving: $updatedPath ---"
+    # -----------------------------------------------------------------------
+    # STEP G - Save to Passed or Failed_QC folder
+    # Macro-enabled files are always saved as .xlsx to guarantee macro elimination.
+    # -----------------------------------------------------------------------
+    $hasQcIssues = $qcIssues.Count -gt 0
+    $saveExt     = if ($isMacroFile) { ".xlsx" } else { $fileItem.Extension.ToLower() }
+    $saveName    = [System.IO.Path]::GetFileNameWithoutExtension($fileItem.Name) + $saveExt
+    $destDir     = if ($hasQcIssues) { $FailedQcDir } else { $PassedDir }
+    $savePath    = Join-Path $destDir $saveName
+    $destLabel   = if ($hasQcIssues) { "Failed_QC" } else { "Passed" }
+
+    Write-Log $ResultsFile "  --- Saving [$destLabel]: $savePath ---"
+
+    $xlFileFormat = switch ($saveExt) {
+        ".xlsx" { 51 }   # xlOpenXMLWorkbook       — also strips any residual macros from xlsm
+        ".xls"  { 56 }   # xlExcel8
+        default { 51 }
+    }
 
     try {
-        $ext = $fileItem.Extension.ToLower()
-        $xlFileFormat = switch ($ext) {
-            ".xlsx" { 51 }   # xlOpenXMLWorkbook
-            ".xlsm" { 52 }   # xlOpenXMLWorkbookMacroEnabled
-            ".xls"  { 56 }   # xlExcel8
-            default { 51 }
-        }
-
         $workbook.SaveAs(
-            $updatedPath,
+            $savePath,
             $xlFileFormat,
             [System.Reflection.Missing]::Value,
             [System.Reflection.Missing]::Value,
@@ -626,9 +689,10 @@ function Invoke-ProcessWorkbook {
             [System.Reflection.Missing]::Value,
             $false
         )
-        Write-Log $ResultsFile "  Saved successfully: $updatedPath"
+        $saveNote = if ($isMacroFile) { " (saved as .xlsx — macros eliminated)" } else { "" }
+        Write-Log $ResultsFile "  Saved successfully$saveNote : $savePath"
     } catch {
-        $msg = "  Could not save '$updatedPath'. Details: $($_.Exception.Message)"
+        $msg = "  Could not save '$savePath' [$($fileItem.Name)]. Details: $($_.Exception.Message)"
         Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
     }
 
@@ -648,7 +712,7 @@ function Invoke-ProcessWorkbook {
         Write-Host $line
     }
 
-    return @{ Counts = $counts; Errors = $errorList; Skipped = $false }
+    return @{ Counts = $counts; Errors = $errorList; Skipped = $false; QcFailed = $hasQcIssues }
 }
 
 # ===========================================================================
