@@ -423,11 +423,8 @@ function Copy-Safe {
     param([string]$Src, [string]$DestDir, [string]$Name)
     $dest = Join-Path $DestDir $Name
     if (Test-Path -LiteralPath $dest) {
-        $base = [System.IO.Path]::GetFileNameWithoutExtension($Name)
-        $ext  = [System.IO.Path]::GetExtension($Name)
-        $n    = 1
-        do { $dest = Join-Path $DestDir "${base}_($n)${ext}"; $n++ } while (Test-Path -LiteralPath $dest)
-        Write-Log "  Name conflict resolved -> $([System.IO.Path]::GetFileName($dest))" -L WARN
+        Write-Log "  Already exists in destination, skipping copy: '$Name'" -L WARN
+        return $dest   # return existing path; do NOT create a second copy
     }
     Copy-Item -LiteralPath $Src -Destination $dest -Force -ErrorAction Stop
     return $dest
@@ -654,6 +651,74 @@ for ($q = 0; $q -lt $qcTotal; $q++) {
         Write-Log "  QC CONFIRMED: '$($rec.Category)'" -L OK
     }
 }
+
+# ============================================================
+#  THIRD PASS - FOLDER DEDUPLICATION QC
+#  Ensures no spreadsheet exists in more than one output folder.
+#  Rule: if a file is in BOTH "Has content" AND "Does not have
+#        content", remove it from "Does not have content".
+# ============================================================
+Write-Log '' ; Write-Log -L SEP
+Write-Log "THIRD PASS  -  FOLDER DEDUPLICATION QC" -L HEAD
+Write-Log -L SEP
+
+function Get-FolderIndex {
+    param([string]$Dir)
+    $idx = @{}
+    if (Test-Path -LiteralPath $Dir) {
+        Get-ChildItem -LiteralPath $Dir -File | ForEach-Object { $idx[$_.Name.ToLower()] = $_.FullName }
+    }
+    return $idx
+}
+
+$idxHas    = Get-FolderIndex -Dir $DirHas
+$idxNo     = Get-FolderIndex -Dir $DirNo
+$idxReview = Get-FolderIndex -Dir $DirReview
+
+$dedupRemoved = 0
+$dedupClean   = 0
+
+# Check every unique filename across all three folders
+$allNames = ($idxHas.Keys + $idxNo.Keys + $idxReview.Keys) | Sort-Object -Unique
+
+foreach ($name in $allNames) {
+    $inHas    = $idxHas.ContainsKey($name)
+    $inNo     = $idxNo.ContainsKey($name)
+    $inReview = $idxReview.ContainsKey($name)
+
+    $locations = @()
+    if ($inHas)    { $locations += 'Has content' }
+    if ($inNo)     { $locations += 'Does not have content' }
+    if ($inReview) { $locations += 'review' }
+
+    if ($locations.Count -gt 1) {
+        Write-Log "  DUPLICATE DETECTED: '$name' found in: $($locations -join ', ')" -L WARN
+
+        # Rule: if in both Has content and Does not have content -> remove from Does not have content
+        if ($inHas -and $inNo) {
+            try {
+                Remove-Item -LiteralPath $idxNo[$name] -Force -ErrorAction Stop
+                Write-Log "    Removed from 'Does not have content' (kept in 'Has content'): '$name'" -L WARN
+                Log-Error "[DEDUP] $name" 'FOLDER_DUPLICATE' "Found in 'Has content' and 'Does not have content' - removed from 'Does not have content'"
+                $cNo--
+                $dedupRemoved++
+            } catch {
+                Write-Log "    ERROR removing '$name' from 'Does not have content': $($_.Exception.Message)" -L ERROR
+                Log-Error "[DEDUP] $name" 'DEDUP_REMOVE_FAILED' $_.Exception.Message
+            }
+        }
+
+        # If in Has content (or Does not have content) AND review, log it but leave review copy
+        if ($inReview -and ($inHas -or $inNo)) {
+            Write-Log "    NOTE: '$name' also exists in 'review' - review copy retained for inspection." -L WARN
+        }
+    } else {
+        $dedupClean++
+    }
+}
+
+Write-Log "  Deduplication complete. Clean: $dedupClean | Duplicates removed: $dedupRemoved" -L INFO
+Write-Log -L SEP
 
 # ============================================================
 #  FINAL SUMMARY
