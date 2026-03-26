@@ -20,7 +20,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$FolderPath
+    [string]$FolderPath,
+
+    # Maximum parallel analysis threads.
+    # 0 = auto (half the logical CPU count, minimum 2, maximum 8).
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0,32)]
+    [int]$MaxThreads = 0
 )
 
 # ============================================================
@@ -114,10 +120,16 @@ function Log-Error {
 # ============================================================
 #  HEADER
 # ============================================================
+# Resolve MaxThreads before first log line so it appears in header
+if ($MaxThreads -eq 0) {
+    $MaxThreads = [Math]::Max(2, [Math]::Min(8, [int][Math]::Floor([Environment]::ProcessorCount / 2)))
+}
+
 Write-Log ('=' * 70) -L HEAD
 Write-Log "  $ScriptName  v$ScriptVersion" -L HEAD
-Write-Log "  Started : $($ScriptStart.ToString('yyyy-MM-dd HH:mm:ss'))" -L HEAD
-Write-Log "  User    : $($env:USERDOMAIN)\$($env:USERNAME)  on  $($env:COMPUTERNAME)" -L HEAD
+Write-Log "  Started  : $($ScriptStart.ToString('yyyy-MM-dd HH:mm:ss'))" -L HEAD
+Write-Log "  User     : $($env:USERDOMAIN)\$($env:USERNAME)  on  $($env:COMPUTERNAME)" -L HEAD
+Write-Log "  CPU cores: $([Environment]::ProcessorCount)  |  Analysis threads: $MaxThreads" -L HEAD
 Write-Log ('=' * 70) -L HEAD
 Write-Log ''
 
@@ -319,83 +331,91 @@ function Get-BinaryXlsContent {
         Error       = $null
     }
 
+    $stream = $null
     try {
-        $bytes = [System.IO.File]::ReadAllBytes($File.FullName)
-        $len   = $bytes.Length
+        $stream = [System.IO.File]::Open($File.FullName,
+                    [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read,
+                    [System.IO.FileShare]::ReadWrite)
 
-        if ($len -lt 8) {
-            $r.Error = "File too small to be valid ($len bytes)."
+        $fileLen = $stream.Length
+        if ($fileLen -lt 8) {
+            $r.Error = "File too small to be valid ($fileLen bytes)."
             return $r
         }
 
-        # Verify OLE2 magic: D0 CF 11 E0 A1 B1 1A E1
+        # Check OLE2 magic from first 8 bytes (no full file load)
+        $hdr = New-Object byte[] 8
+        [void]$stream.Read($hdr, 0, 8)
+        $stream.Position = 0
         $magic = [byte[]](0xD0,0xCF,0x11,0xE0,0xA1,0xB1,0x1A,0xE1)
         $isOle = $true
-        for ($m = 0; $m -lt 8; $m++) { if ($bytes[$m] -ne $magic[$m]) { $isOle = $false; break } }
+        for ($m = 0; $m -lt 8; $m++) { if ($hdr[$m] -ne $magic[$m]) { $isOle = $false; break } }
         if ($isOle) {
             $r.Details.Add("OLE2 Compound Document confirmed.")
         } else {
             $r.Details.Add("WARNING: OLE2 magic not found - may be older BIFF or corrupted. Scanning anyway.")
         }
 
-        $msoDrw     = 0
-        $msoDrwGrp  = 0
-        $chartBof   = 0
-        $imdata     = 0
-        $limit      = $len - 4
+        # Streaming scan in 256 KB chunks with 8-byte overlap to catch cross-boundary patterns.
+        # This avoids loading the entire file into memory.
+        $CHUNK   = 256 * 1024
+        $OVERLAP = 8
+        $buf     = New-Object byte[] ($CHUNK + $OVERLAP)
+        $prev    = New-Object byte[] $OVERLAP
+        $gOffset = [long]0
+        $first   = $true
+        $msoDrw = 0; $msoDrwGrp = 0; $chartBof = 0; $imdata = 0
 
-        for ($i = 0; $i -lt $limit; $i++) {
-            $b0 = $bytes[$i]; $b1 = $bytes[$i + 1]
+        while ($true) {
+            if (-not $first) { [Array]::Copy($prev, 0, $buf, 0, $OVERLAP) }
+            $readStart = if ($first) { 0 } else { $OVERLAP }
+            $bytesRead = $stream.Read($buf, $readStart, $CHUNK)
+            if ($bytesRead -eq 0) { break }
 
-            # MSODRAWING      0x00EC
-            if ($b0 -eq 0xEC -and $b1 -eq 0x00) { $msoDrw++ }
+            $scanEnd = $readStart + $bytesRead
+            $tailSrc = $scanEnd - $OVERLAP
+            if ($tailSrc -ge 0) { [Array]::Copy($buf, $tailSrc, $prev, 0, $OVERLAP) }
 
-            # MSODRAWINGGROUP 0x00EB
-            elseif ($b0 -eq 0xEB -and $b1 -eq 0x00) { $msoDrwGrp++ }
-
-            # IMDATA          0x007F
-            elseif ($b0 -eq 0x7F -and $b1 -eq 0x00) {
-                $imdata++
-                $r.HasImage = $true
-                $r.Details.Add("IMDATA record (image) at offset $i")
-            }
-
-            # BOF             0x0809  - chart type = 0x0020
-            elseif ($b0 -eq 0x09 -and $b1 -eq 0x08 -and ($i + 7) -lt $len) {
-                $recLen = [BitConverter]::ToUInt16($bytes, $i + 2)
-                if ($recLen -ge 4 -and ($i + 4 + $recLen) -le $len) {
-                    $bofType = [BitConverter]::ToUInt16($bytes, $i + 6)
-                    if ($bofType -eq 0x0020) {
-                        $chartBof++
-                        $r.HasChart = $true
-                        $r.Details.Add("Chart BOF (type=0x0020) at offset $i")
+            for ($i = 0; $i -lt ($scanEnd - 1); $i++) {
+                $b0 = $buf[$i]; $b1 = $buf[$i + 1]
+                if      ($b0 -eq 0xEC -and $b1 -eq 0x00) { $msoDrw++ }
+                elseif  ($b0 -eq 0xEB -and $b1 -eq 0x00) { $msoDrwGrp++ }
+                elseif  ($b0 -eq 0x7F -and $b1 -eq 0x00) {
+                    $imdata++; $r.HasImage = $true
+                    $r.Details.Add("IMDATA record at offset ~$($gOffset + $i)")
+                }
+                elseif ($b0 -eq 0x09 -and $b1 -eq 0x08 -and ($i + 7) -lt $scanEnd) {
+                    $recLen = [BitConverter]::ToUInt16($buf, $i + 2)
+                    if ($recLen -ge 4 -and ($i + 4 + $recLen) -lt $scanEnd) {
+                        $bofType = [BitConverter]::ToUInt16($buf, $i + 6)
+                        if ($bofType -eq 0x0020) {
+                            $chartBof++; $r.HasChart = $true
+                            $r.Details.Add("Chart BOF at offset ~$($gOffset + $i)")
+                        }
                     }
                 }
             }
+            $gOffset += $bytesRead
+            $first    = $false
         }
 
-        # Interpret drawing records
         if ($msoDrw -gt 0) {
             $r.DrawingCount = $msoDrw
             $r.Details.Add("MSODRAWING records: $msoDrw")
-            if ($chartBof -eq 0) {
-                # Drawings without chart BOFs => images/shapes
-                $r.HasImage = $true
-            } else {
-                # Some drawings are charts; remaining may be images
-                if (($msoDrw - $chartBof) -gt 0 -or $imdata -gt 0) { $r.HasImage = $true }
-            }
+            if ($chartBof -eq 0) { $r.HasImage = $true }
+            elseif (($msoDrw - $chartBof) -gt 0 -or $imdata -gt 0) { $r.HasImage = $true }
         }
-
         if ($msoDrwGrp -gt 0) { $r.Details.Add("MSODRAWINGGROUP records: $msoDrwGrp") }
 
         $r.ChartCount  = $chartBof
         $r.ImageCount  = if ($imdata -gt 0) { $imdata } else { [Math]::Max(0, $msoDrw - $chartBof) }
-
         $r.Details.Add("Binary scan totals - MSODRAWING:$msoDrw | MSODRAWINGGROUP:$msoDrwGrp | ChartBOF:$chartBof | IMDATA:$imdata")
 
     } catch {
         $r.Error = "Binary analysis failed: $($_.Exception.Message)"
+    } finally {
+        if ($stream) { try { $stream.Dispose() } catch {} }
     }
     return $r
 }
@@ -466,107 +486,195 @@ Write-Log -L SEP
 
 $Results = [System.Collections.Generic.List[PSCustomObject]]::new()
 
+# ── Build a RunspacePool so analysis runs on up to $MaxThreads threads.
+#    File I/O checks (exist + read access) are done sequentially first —
+#    they are fast and avoid burning threads on files that cannot be read.
+#    Only the CPU-bound analysis work is parallelised.
+#    Copying files to output folders stays sequential (safe filesystem writes).
+
+$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+$iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new(
+    'Get-OoxmlContent',     ${function:Get-OoxmlContent}.ToString()))
+$iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new(
+    'Get-BinaryXlsContent', ${function:Get-BinaryXlsContent}.ToString()))
+
+$pool = [RunspaceFactory]::CreateRunspacePool(1, $MaxThreads, $iss, $Host)
+$pool.ApartmentState = 'MTA'
+$pool.Open()
+
+# Script block executed inside each runspace (functions pre-loaded via ISS above)
+$WorkerScript = {
+    param([string]$FilePath, [string]$Ext, [string[]]$OoxmlExts, [string[]]$BinaryExts)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression            -ErrorAction SilentlyContinue
+    $f = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+    if ($OoxmlExts  -contains $Ext) { return Get-OoxmlContent     -File $f }
+    if ($BinaryExts -contains $Ext) { return Get-BinaryXlsContent -File $f }
+    return [PSCustomObject]@{
+        HasChart=$false; HasImage=$false; HasSmartArt=$false
+        ChartCount=0; ImageCount=0; DrawingCount=0; SmartArtCnt=0
+        Details=[System.Collections.Generic.List[string]]::new()
+        Error="Unsupported extension: $Ext"
+    }
+}
+
+# Phase 1: pre-flight checks + submit to pool
+$pending = [System.Collections.Generic.List[hashtable]]::new()
+
 for ($i = 0; $i -lt $cTotal; $i++) {
     $file = $allFiles[$i]
     $idx  = $i + 1
-    $pct  = [Math]::Round(($idx / $cTotal) * 100)
 
     Write-Log ''
-    Write-Log "[$idx/$cTotal] $pct% - $($file.Name)" -L HEAD
-    Write-Log "  Path     : $($file.FullName)" -L INFO
-    Write-Log "  Size     : $([Math]::Round($file.Length/1KB,2)) KB" -L INFO
-    Write-Log "  Modified : $($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -L INFO
+    Write-Log "[$idx/$cTotal] Pre-flight: $($file.Name)" -L HEAD
+    Write-Log "  Path : $($file.FullName)" -L INFO
+    Write-Log "  Size : $([Math]::Round($file.Length/1KB,2)) KB  |  Modified: $($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -L INFO
 
-    $rec = [PSCustomObject]@{
-        Index      = $idx
-        File       = $file
-        Category   = 'review'
-        HasChart   = $false; HasImage = $false
-        ChartCount = 0;      ImageCount = 0; DrawingCount = 0
-        Details    = @()
-        Error      = $null
-        CopiedTo   = $null
-    }
-
-    # -- Existence --
+    # Existence check
     if (-not (Test-Path -LiteralPath $file.FullName -PathType Leaf)) {
-        $rec.Error = "File no longer exists at path."
-        Log-Error "[$idx] $($file.FullName)" 'FILE_NOT_FOUND' $rec.Error
-        $Results.Add($rec); $cReview++; continue
+        $err = "File no longer exists at path."
+        Log-Error "[$idx] $($file.FullName)" 'FILE_NOT_FOUND' $err
+        $Results.Add([PSCustomObject]@{
+            Index=$idx; File=$file; Category='review'
+            HasChart=$false; HasImage=$false; ChartCount=0; ImageCount=0; DrawingCount=0
+            Details=@(); Error=$err; CopiedTo=$null
+        })
+        $cReview++; continue
     }
 
-    # -- Read access --
+    # Read-access check
     $ts = $null
     try {
-        $ts = [System.IO.File]::Open($file.FullName,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                [System.IO.FileShare]::ReadWrite)
-        Write-Log "  Read access OK ($($ts.Length) bytes)." -L DBG
+        $ts = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        Write-Log "  Access OK." -L DBG
     } catch {
-        $rec.Error = "Cannot open for reading: $($_.Exception.Message)"
-        Log-Error "[$idx] $($file.FullName)" 'ACCESS_DENIED' $rec.Error
-        $Results.Add($rec); $cReview++; continue
+        $err = "Cannot open for reading: $($_.Exception.Message)"
+        Log-Error "[$idx] $($file.FullName)" 'ACCESS_DENIED' $err
+        $Results.Add([PSCustomObject]@{
+            Index=$idx; File=$file; Category='review'
+            HasChart=$false; HasImage=$false; ChartCount=0; ImageCount=0; DrawingCount=0
+            Details=@(); Error=$err; CopiedTo=$null
+        })
+        $cReview++; continue
     } finally {
         if ($ts) { try { $ts.Close(); $ts.Dispose() } catch {} }
     }
 
-    # -- Analyse --
-    $a = $null
-    try   { $a = Invoke-Analysis -File $file }
-    catch {
-        $rec.Error = "Analysis exception: $($_.Exception.Message)"
-        Log-Error "[$idx] $($file.FullName)" 'ANALYSIS_EXCEPTION' $rec.Error
-        $Results.Add($rec); $cReview++; continue
-    }
-
-    if ($a.Error) {
-        $rec.Error = $a.Error
-        Log-Error "[$idx] $($file.FullName)" 'ANALYSIS_ERROR' $a.Error
-        $rec.Details = @($a.Details)
-        $Results.Add($rec); $cReview++; continue
-    }
-
-    $rec.HasChart    = $a.HasChart
-    $rec.HasImage    = $a.HasImage
-    $rec.ChartCount  = $a.ChartCount
-    $rec.ImageCount  = $a.ImageCount
-    $rec.DrawingCount= $a.DrawingCount
-    $rec.Details     = @($a.Details)
-
-    $hasContent      = $a.HasChart -or $a.HasImage -or $a.HasSmartArt
-    $rec.Category    = if ($hasContent) { 'Has content' } else { 'Does not have content' }
-
-    Write-Log "  Charts   : $($a.ChartCount)" -L INFO
-    Write-Log "  Images   : $($a.ImageCount)" -L INFO
-    Write-Log "  Drawings : $($a.DrawingCount)" -L INFO
-    Write-Log "  SmartArt : $($a.SmartArtCnt)" -L INFO
-    $_lvl = if ($hasContent) { 'OK' } else { 'INFO' }
-    Write-Log "  RESULT   : $($rec.Category)" -L $_lvl
-
-    foreach ($d in $a.Details) { Write-Log "    >> $d" -L DBG }
-
-    # -- Copy --
-    $targetDir = if ($hasContent) { $DirHas } else { $DirNo }
-    try {
-        $rec.CopiedTo = Copy-Safe -Src $file.FullName -DestDir $targetDir -Name $file.Name
-        Write-Log "  Copied -> $($rec.CopiedTo)" -L OK
-        if ($hasContent) { $cHas++ } else { $cNo++ }
-    } catch {
-        $rec.Error    = "Copy failed: $_"
-        $rec.Category = 'review'
-        Log-Error "[$idx] $($file.FullName)" 'COPY_FAILED' $rec.Error
-        try {
-            $rec.CopiedTo = Copy-Safe -Src $file.FullName -DestDir $DirReview -Name $file.Name
-            Write-Log "  Fallback copy -> review" -L WARN
-        } catch {
-            Write-Log "  CRITICAL: Could not copy to any output: $_" -L ERROR
-        }
-        $cReview++
-    }
-
-    $Results.Add($rec)
+    # Submit analysis to pool
+    $ps = [PowerShell]::Create()
+    $ps.RunspacePool = $pool
+    [void]$ps.AddScript($WorkerScript)
+    [void]$ps.AddArgument($file.FullName)
+    [void]$ps.AddArgument($file.Extension.ToLower())
+    [void]$ps.AddArgument($OoxmlExts)
+    [void]$ps.AddArgument($BinaryExts)
+    $pending.Add(@{ PS=$ps; Handle=$ps.BeginInvoke(); File=$file; Index=$idx })
+    Write-Log "  Submitted to analysis pool." -L DBG
 }
+
+Write-Log ''
+Write-Log "Pre-flight done. Collecting $($pending.Count) analysis result(s)..." -L INFO
+
+# Phase 2: collect results as threads complete, then copy (sequential)
+$doneCount = 0
+while ($pending.Count -gt 0) {
+    $finished = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($job in $pending) {
+        if ($job.Handle.IsCompleted) { $finished.Add($job) }
+    }
+
+    foreach ($job in $finished) {
+        [void]$pending.Remove($job)
+        $doneCount++
+
+        $raw = $null
+        try   { $raw = $job.PS.EndInvoke($job.Handle) }
+        catch {
+            $errMsg = "Runspace execution error: $($_.Exception.Message)"
+            Log-Error "[$($job.Index)] $($job.File.Name)" 'RUNSPACE_ERROR' $errMsg
+        }
+        # Log any non-terminating errors from the runspace stream
+        if ($job.PS.HadErrors) {
+            foreach ($se in $job.PS.Streams.Error) {
+                Write-Log "  Runspace stream error ($($job.File.Name)): $($se.Exception.Message)" -L WARN
+            }
+        }
+        $job.PS.Dispose()
+
+        # EndInvoke returns a PSDataCollection; unwrap the first element
+        $a = if ($raw -and $raw.Count -gt 0) { $raw[0] } else { $null }
+
+        Write-Log ''
+        Write-Log "[$($job.Index)/$cTotal] Result ($doneCount of $($pending.Count + $doneCount) done): $($job.File.Name)" -L HEAD
+
+        $rec = [PSCustomObject]@{
+            Index      = $job.Index
+            File       = $job.File
+            Category   = 'review'
+            HasChart   = $false; HasImage = $false
+            ChartCount = 0;      ImageCount = 0; DrawingCount = 0
+            Details    = @()
+            Error      = $null
+            CopiedTo   = $null
+        }
+
+        if ($null -eq $a) {
+            $rec.Error = "Analysis returned no result."
+            $Results.Add($rec); $cReview++; continue
+        }
+
+        if ($a.Error) {
+            $rec.Error = $a.Error
+            Log-Error "[$($job.Index)] $($job.File.FullName)" 'ANALYSIS_ERROR' $a.Error
+            $rec.Details = @($a.Details)
+            $Results.Add($rec); $cReview++; continue
+        }
+
+        $rec.HasChart     = $a.HasChart
+        $rec.HasImage     = $a.HasImage
+        $rec.ChartCount   = $a.ChartCount
+        $rec.ImageCount   = $a.ImageCount
+        $rec.DrawingCount = $a.DrawingCount
+        $rec.Details      = @($a.Details)
+
+        $hasContent   = $a.HasChart -or $a.HasImage -or $a.HasSmartArt
+        $rec.Category = if ($hasContent) { 'Has content' } else { 'Does not have content' }
+
+        Write-Log "  Charts   : $($a.ChartCount)"   -L INFO
+        Write-Log "  Images   : $($a.ImageCount)"   -L INFO
+        Write-Log "  Drawings : $($a.DrawingCount)" -L INFO
+        Write-Log "  SmartArt : $($a.SmartArtCnt)"  -L INFO
+        $_lvl = if ($hasContent) { 'OK' } else { 'INFO' }
+        Write-Log "  RESULT   : $($rec.Category)"   -L $_lvl
+        foreach ($d in $a.Details) { Write-Log "    >> $d" -L DBG }
+
+        # Copy to output (sequential — safe filesystem write)
+        $targetDir = if ($hasContent) { $DirHas } else { $DirNo }
+        try {
+            $rec.CopiedTo = Copy-Safe -Src $job.File.FullName -DestDir $targetDir -Name $job.File.Name
+            Write-Log "  Copied -> $($rec.CopiedTo)" -L OK
+            if ($hasContent) { $cHas++ } else { $cNo++ }
+        } catch {
+            $rec.Error    = "Copy failed: $_"
+            $rec.Category = 'review'
+            Log-Error "[$($job.Index)] $($job.File.FullName)" 'COPY_FAILED' $rec.Error
+            try {
+                $rec.CopiedTo = Copy-Safe -Src $job.File.FullName -DestDir $DirReview -Name $job.File.Name
+                Write-Log "  Fallback copy -> review" -L WARN
+            } catch {
+                Write-Log "  CRITICAL: Could not copy to any output: $_" -L ERROR
+            }
+            $cReview++
+        }
+        $Results.Add($rec)
+    }
+
+    if ($pending.Count -gt 0) { Start-Sleep -Milliseconds 150 }
+}
+
+$pool.Close()
+$pool.Dispose()
 
 # ============================================================
 #  FIRST PASS SUMMARY
