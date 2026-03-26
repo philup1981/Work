@@ -689,7 +689,7 @@ function Invoke-ProcessWorkbook {
             [System.Reflection.Missing]::Value,
             $false
         )
-        $saveNote = if ($isMacroFile) { " (saved as .xlsx — macros eliminated)" } else { "" }
+        $saveNote = if ($isMacroFile) { " (saved as .xlsx - macros eliminated)" } else { "" }
         Write-Log $ResultsFile "  Saved successfully$saveNote : $savePath"
     } catch {
         $msg = "  Could not save '$savePath' [$($fileItem.Name)]. Details: $($_.Exception.Message)"
@@ -858,7 +858,7 @@ foreach ($fileItem in $excelFiles) {
                } else { "ETA calculating..." }
 
     Write-Host ""
-    Write-Host "[$fileIndex / $($excelFiles.Count)] ($pct%)  $($fileItem.Name)  —  $eta"
+    Write-Host "[$fileIndex / $($excelFiles.Count)] ($pct%)  $($fileItem.Name)  - $eta"
 
     # Restart Excel every $ExcelRestartInterval files to release COM memory pressure
     if ($fileIndex -gt 1 -and (($fileIndex - 1) % $ExcelRestartInterval) -eq 0) {
