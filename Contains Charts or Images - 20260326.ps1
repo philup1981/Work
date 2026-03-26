@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Contains Charts or Images - 20260326.ps1
@@ -335,7 +335,7 @@ function Get-BinaryXlsContent {
         if ($isOle) {
             $r.Details.Add("OLE2 Compound Document confirmed.")
         } else {
-            $r.Details.Add("WARNING: OLE2 magic not found — may be older BIFF or corrupted. Scanning anyway.")
+            $r.Details.Add("WARNING: OLE2 magic not found - may be older BIFF or corrupted. Scanning anyway.")
         }
 
         $msoDrw     = 0
@@ -360,7 +360,7 @@ function Get-BinaryXlsContent {
                 $r.Details.Add("IMDATA record (image) at offset $i")
             }
 
-            # BOF             0x0809  — chart type = 0x0020
+            # BOF             0x0809  - chart type = 0x0020
             elseif ($b0 -eq 0x09 -and $b1 -eq 0x08 -and ($i + 7) -lt $len) {
                 $recLen = [BitConverter]::ToUInt16($bytes, $i + 2)
                 if ($recLen -ge 4 -and ($i + 4 + $recLen) -le $len) {
@@ -392,7 +392,7 @@ function Get-BinaryXlsContent {
         $r.ChartCount  = $chartBof
         $r.ImageCount  = if ($imdata -gt 0) { $imdata } else { [Math]::Max(0, $msoDrw - $chartBof) }
 
-        $r.Details.Add("Binary scan totals — MSODRAWING:$msoDrw | MSODRAWINGGROUP:$msoDrwGrp | ChartBOF:$chartBof | IMDATA:$imdata")
+        $r.Details.Add("Binary scan totals - MSODRAWING:$msoDrw | MSODRAWINGGROUP:$msoDrwGrp | ChartBOF:$chartBof | IMDATA:$imdata")
 
     } catch {
         $r.Error = "Binary analysis failed: $($_.Exception.Message)"
@@ -437,7 +437,7 @@ function Copy-Safe {
 #  FILE DISCOVERY
 # ============================================================
 Write-Log '' ; Write-Log -L SEP
-Write-Log "FILE DISCOVERY  —  scanning '$FolderPath'" -L HEAD
+Write-Log "FILE DISCOVERY  -  scanning '$FolderPath'" -L HEAD
 Write-Log -L SEP
 
 try {
@@ -464,7 +464,7 @@ if ($cTotal -eq 0) {
 #  FIRST PASS
 # ============================================================
 Write-Log '' ; Write-Log -L SEP
-Write-Log "FIRST PASS  —  $cTotal file(s)" -L HEAD
+Write-Log "FIRST PASS  -  $cTotal file(s)" -L HEAD
 Write-Log -L SEP
 
 $Results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -475,7 +475,7 @@ for ($i = 0; $i -lt $cTotal; $i++) {
     $pct  = [Math]::Round(($idx / $cTotal) * 100)
 
     Write-Log ''
-    Write-Log "[$idx/$cTotal]($pct%) $($file.Name)" -L HEAD
+    Write-Log "[$idx/$cTotal] $pct% - $($file.Name)" -L HEAD
     Write-Log "  Path     : $($file.FullName)" -L INFO
     Write-Log "  Size     : $([Math]::Round($file.Length/1KB,2)) KB" -L INFO
     Write-Log "  Modified : $($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -L INFO
@@ -582,10 +582,10 @@ Write-Log "  Review (errors)    : $cReview" -L (if ($cReview -gt 0) { 'WARN' } e
 Write-Log -L SEP
 
 # ============================================================
-#  SECOND PASS — QC VERIFICATION
+#  SECOND PASS - QC VERIFICATION
 # ============================================================
 Write-Log '' ; Write-Log -L SEP
-Write-Log "SECOND PASS  —  QC VERIFICATION" -L HEAD
+Write-Log "SECOND PASS  -  QC VERIFICATION" -L HEAD
 Write-Log -L SEP
 
 $qcFiles    = @($Results | Where-Object { $_.Category -ne 'review' -and $null -ne $_.CopiedTo })
