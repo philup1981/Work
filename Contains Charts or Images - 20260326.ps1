@@ -544,7 +544,8 @@ for ($i = 0; $i -lt $cTotal; $i++) {
     Write-Log "  Images   : $($a.ImageCount)" -L INFO
     Write-Log "  Drawings : $($a.DrawingCount)" -L INFO
     Write-Log "  SmartArt : $($a.SmartArtCnt)" -L INFO
-    Write-Log "  RESULT   : $($rec.Category)" -L (if ($hasContent) { 'OK' } else { 'INFO' })
+    $_lvl = if ($hasContent) { 'OK' } else { 'INFO' }
+    Write-Log "  RESULT   : $($rec.Category)" -L $_lvl
 
     foreach ($d in $a.Details) { Write-Log "    >> $d" -L DBG }
 
@@ -578,7 +579,8 @@ Write-Log "FIRST PASS COMPLETE" -L HEAD
 Write-Log "  Total              : $cTotal" -L INFO
 Write-Log "  Has content        : $cHas"   -L OK
 Write-Log "  Does not have content: $cNo"  -L INFO
-Write-Log "  Review (errors)    : $cReview" -L (if ($cReview -gt 0) { 'WARN' } else { 'INFO' })
+$_lvl = if ($cReview -gt 0) { 'WARN' } else { 'INFO' }
+Write-Log "  Review (errors)    : $cReview" -L $_lvl
 Write-Log -L SEP
 
 # ============================================================
@@ -674,7 +676,8 @@ Write-Log "  --- Classification ---" -L HEAD
 Write-Log "  Total files              : $cTotal"   -L INFO
 Write-Log "  Has content              : $cHas"     -L OK
 Write-Log "  Does not have content    : $cNo"      -L INFO
-Write-Log "  Review (errors / QC fail): $cReview"  -L (if ($cReview -gt 0) { 'WARN' } else { 'INFO' })
+$_lvl = if ($cReview -gt 0) { 'WARN' } else { 'INFO' }
+Write-Log "  Review (errors / QC fail): $cReview" -L $_lvl
 Write-Log ''
 Write-Log "  --- Content Totals (Pass 1) ---" -L HEAD
 Write-Log "  Charts found             : $tCharts"   -L INFO
@@ -684,11 +687,14 @@ Write-Log ''
 Write-Log "  --- QC Results ---" -L HEAD
 Write-Log "  Files QC-checked         : $qcTotal"    -L INFO
 Write-Log "  Confirmed correct        : $qcVerified" -L OK
-Write-Log "  Mismatches (-> review)   : $qcMismatch" -L (if ($qcMismatch -gt 0) { 'WARN' } else { 'INFO' })
-Write-Log "  QC errors                : $qcErr"      -L (if ($qcErr -gt 0) { 'WARN' } else { 'INFO' })
+$_lvl = if ($qcMismatch -gt 0) { 'WARN' } else { 'INFO' }
+Write-Log "  Mismatches (-> review)   : $qcMismatch" -L $_lvl
+$_lvl = if ($qcErr -gt 0) { 'WARN' } else { 'INFO' }
+Write-Log "  QC errors                : $qcErr"      -L $_lvl
 Write-Log ''
 Write-Log "  --- Error Log ---" -L HEAD
-Write-Log "  Total errors recorded    : $($Errors.Count)" -L (if ($Errors.Count -gt 0) { 'WARN' } else { 'INFO' })
+$_lvl = if ($Errors.Count -gt 0) { 'WARN' } else { 'INFO' }
+Write-Log "  Total errors recorded    : $($Errors.Count)" -L $_lvl
 Write-Log ''
 Write-Log "  --- Output ---" -L HEAD
 Write-Log "  Has content dir          : $DirHas"    -L INFO
