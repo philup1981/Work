@@ -336,10 +336,12 @@ function Invoke-ProcessWorkbook {
         }
 
         # D2: Flatten remaining formulas to static values
+        # Assigning Value2 = Value2 replaces all formulas with their results in-place
+        # without using the clipboard, which avoids the "copy/paste area not same size"
+        # error that occurs when merged cells are present in the used range.
         try {
             $usedRng = $ws.UsedRange
-            $usedRng.Copy()
-            $usedRng.PasteSpecial(-4163)               # xlPasteValues — replaces every formula with its result
+            $usedRng.Value2 = $usedRng.Value2
             $counts["Formulas Flattened"]++
             Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
