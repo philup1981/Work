@@ -369,13 +369,13 @@ function Invoke-WorkbookInspection {
             try { $sheetType = $sheet.Type } catch { }
 
             if ($sheetType -ne $XL_WORKSHEET) {
-                Write-Log "    [SHEET TYPE] '$sName' is not a standard worksheet (Type=$sheetType) — skipping cell-level checks" -Level DEBUG
+                Write-Log "    [SHEET TYPE] '$sName' is not a standard worksheet (Type=$sheetType) - skipping cell-level checks" -Level DEBUG
                 Release-ComObject $sheet
                 continue
             }
 
             # --- CHECK 2 : Pivot tables -------------------------------------
-            Write-Log "    [CHECK 2] '$sName' — pivot tables..." -Level DEBUG
+            Write-Log "    [CHECK 2] '$sName' - pivot tables..." -Level DEBUG
             try {
                 $ptCount = $sheet.PivotTables().Count
                 if ($ptCount -gt 0) {
@@ -394,7 +394,7 @@ function Invoke-WorkbookInspection {
             try { $usedRange = $sheet.UsedRange } catch { }
 
             if ($null -eq $usedRange) {
-                Write-Log "    '$sName' has no used range — skipping formulas/rows/columns checks" -Level DEBUG
+                Write-Log "    '$sName' has no used range - skipping formulas/rows/columns checks" -Level DEBUG
                 Release-ComObject $sheet
                 continue
             }
@@ -404,10 +404,10 @@ function Invoke-WorkbookInspection {
             Write-Log "    Used range: $usedRows row(s) x $usedCols column(s)" -Level DEBUG
 
             # --- CHECK 3 : Formulas -----------------------------------------
-            Write-Log "    [CHECK 3] '$sName' — formulas..." -Level DEBUG
+            Write-Log "    [CHECK 3] '$sName' - formulas..." -Level DEBUG
             try {
                 # SpecialCells throws a COMException (not a PowerShell error) when no
-                # matching cells exist — that is the expected "no formulas" signal.
+                # matching cells exist - that is the expected "no formulas" signal.
                 $fCells = $usedRange.SpecialCells($XL_CELL_FORMULAS)
                 if ($null -ne $fCells) {
                     $r.HasFormulas = $true
@@ -416,7 +416,7 @@ function Invoke-WorkbookInspection {
                 }
                 Release-ComObject $fCells
             } catch [System.Runtime.InteropServices.COMException] {
-                # Normal — no formula cells present
+                # Normal - no formula cells present
                 Write-Log "    [FORMULAS] '$sName'  -  none" -Level DEBUG
             } catch {
                 Write-Log "    [FORMULAS] '$sName'  -  check failed (non-fatal) : $($_.Exception.Message)" -Level WARN
@@ -424,7 +424,7 @@ function Invoke-WorkbookInspection {
 
             # --- CHECK 4 : Hidden rows (within used range) ------------------
             if ($usedRows -gt 0) {
-                Write-Log "    [CHECK 4] '$sName' — scanning $usedRows row(s) for hidden status..." -Level DEBUG
+                Write-Log "    [CHECK 4] '$sName' - scanning $usedRows row(s) for hidden status..." -Level DEBUG
                 $hiddenRowCount = 0
                 try {
                     for ($ri = 1; $ri -le $usedRows; $ri++) {
@@ -433,7 +433,7 @@ function Invoke-WorkbookInspection {
                         Release-ComObject $rowObj
                     }
                 } catch {
-                    Write-Log "    [ROWS] '$sName' — scan interrupted at row index $ri : $($_.Exception.Message)" -Level WARN
+                    Write-Log "    [ROWS] '$sName' - scan interrupted at row index $ri : $($_.Exception.Message)" -Level WARN
                 }
 
                 if ($hiddenRowCount -gt 0) {
@@ -447,7 +447,7 @@ function Invoke-WorkbookInspection {
 
             # --- CHECK 5 : Hidden columns (within used range) ---------------
             if ($usedCols -gt 0) {
-                Write-Log "    [CHECK 5] '$sName' — scanning $usedCols column(s) for hidden status..." -Level DEBUG
+                Write-Log "    [CHECK 5] '$sName' - scanning $usedCols column(s) for hidden status..." -Level DEBUG
                 $hiddenColCount = 0
                 try {
                     for ($ci = 1; $ci -le $usedCols; $ci++) {
@@ -456,7 +456,7 @@ function Invoke-WorkbookInspection {
                         Release-ComObject $colObj
                     }
                 } catch {
-                    Write-Log "    [COLUMNS] '$sName' — scan interrupted at column index $ci : $($_.Exception.Message)" -Level WARN
+                    Write-Log "    [COLUMNS] '$sName' - scan interrupted at column index $ci : $($_.Exception.Message)" -Level WARN
                 }
 
                 if ($hiddenColCount -gt 0) {
@@ -499,7 +499,7 @@ function Invoke-WorkbookInspection {
 # MAIN SCRIPT BODY
 # =============================================================================
 
-Write-LogSection "SPREADSHEET QC CHECK — HIDDEN CONTENT DETECTOR"
+Write-LogSection "SPREADSHEET QC CHECK - HIDDEN CONTENT DETECTOR"
 Write-Log "Script version   : 1.0" -Level INFO
 Write-Log "Start time       : $($script:StartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -Level INFO
 Write-Log "Running as user  : $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)" -Level INFO
@@ -600,7 +600,7 @@ try {
     Write-Log "       All $totalFiles file(s) will be placed in the Review folder." -Level ERROR
 
     foreach ($f in $spreadsheetFiles) {
-        $script:ErrorList.Add("$($f.Name)  |  REASON: Excel COM unavailable — $($_.Exception.Message)")
+        $script:ErrorList.Add("$($f.Name)  |  REASON: Excel COM unavailable - $($_.Exception.Message)")
         try {
             Copy-ToOutput -SourcePath $f.FullName -DestDir $dirReview -OriginalName $f.Name | Out-Null
             Write-Log "  Copied to Review: $($f.Name)" -Level WARN
@@ -643,7 +643,7 @@ foreach ($file in $spreadsheetFiles) {
         Write-Log "       It may have been moved, renamed, or deleted during processing." -Level ERROR
         $script:ErrorList.Add("$fileName  |  REASON: File not found at path '$filePath' during processing")
         $countReview++
-        continue   # No file to copy — skip
+        continue   # No file to copy - skip
     }
 
     # --- Check the file is not locked by another process ---
@@ -652,13 +652,13 @@ foreach ($file in $spreadsheetFiles) {
         $fs = [System.IO.File]::Open($filePath, 'Open', 'Read', 'ReadWrite')
         $fs.Close()
         $fs.Dispose()
-        Write-Log "File lock check passed — file is accessible." -Level DEBUG
+        Write-Log "File lock check passed - file is accessible." -Level DEBUG
     } catch {
         $lockMsg = $_.Exception.Message
         Write-Log "ERROR: '$fileName' is locked or inaccessible." -Level ERROR
         Write-Log "       $lockMsg" -Level ERROR
         Write-Log "       The file may be open in another application. Close it and re-run." -Level ERROR
-        $script:ErrorList.Add("$fileName  |  REASON: File locked / inaccessible — $lockMsg")
+        $script:ErrorList.Add("$fileName  |  REASON: File locked / inaccessible - $lockMsg")
         try {
             $dest = Copy-ToOutput -SourcePath $filePath -DestDir $dirReview -OriginalName $fileName
             Write-Log "Copied to Review: $dest" -Level WARN
@@ -678,7 +678,7 @@ foreach ($file in $spreadsheetFiles) {
         Write-Log "INSPECTION FAILED for '$fileName'." -Level ERROR
         Write-Log "  Error detail: $($result.ErrorMessage)" -Level ERROR
         Write-Log "  File will be placed in Review for manual examination." -Level WARN
-        $script:ErrorList.Add("$fileName  |  REASON: Inspection failed — $($result.ErrorMessage)")
+        $script:ErrorList.Add("$fileName  |  REASON: Inspection failed - $($result.ErrorMessage)")
         try {
             $dest = Copy-ToOutput -SourcePath $filePath -DestDir $dirReview -OriginalName $fileName
             Write-Log "Copied to Review: $dest" -Level WARN
@@ -747,7 +747,7 @@ foreach ($file in $spreadsheetFiles) {
             Write-Log "File copied to 'Has content' : $dest" -Level INFO
         } catch {
             Write-Log "ERROR: Failed to copy '$fileName' to 'Has content' : $($_.Exception.Message)" -Level ERROR
-            $script:ErrorList.Add("$fileName  |  REASON: Failed to copy to 'Has content' — $($_.Exception.Message)")
+            $script:ErrorList.Add("$fileName  |  REASON: Failed to copy to 'Has content' - $($_.Exception.Message)")
         }
         $countHasContent++
 
@@ -758,7 +758,7 @@ foreach ($file in $spreadsheetFiles) {
             Write-Log "File copied to 'Does not have content' : $dest" -Level INFO
         } catch {
             Write-Log "ERROR: Failed to copy '$fileName' to 'Does not have content' : $($_.Exception.Message)" -Level ERROR
-            $script:ErrorList.Add("$fileName  |  REASON: Failed to copy to 'Does not have content' — $($_.Exception.Message)")
+            $script:ErrorList.Add("$fileName  |  REASON: Failed to copy to 'Does not have content' - $($_.Exception.Message)")
         }
         $countNoContent++
     }
@@ -781,7 +781,7 @@ Write-Log "Excel COM application released successfully." -Level INFO
 $endTime  = Get-Date
 $duration = $endTime - $script:StartTime
 
-Write-LogSection "PROCESSING COMPLETE — SUMMARY"
+Write-LogSection "PROCESSING COMPLETE - SUMMARY"
 Write-Log "Finished at        : $($endTime.ToString('yyyy-MM-dd HH:mm:ss'))" -Level INFO
 Write-Log "Total duration     : $($duration.ToString('hh\:mm\:ss\.fff'))" -Level INFO
 Write-Log "Files scanned      : $totalFiles" -Level INFO
