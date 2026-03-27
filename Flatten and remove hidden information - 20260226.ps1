@@ -336,12 +336,24 @@ function Invoke-ProcessWorkbook {
         }
 
         # D2: Flatten remaining formulas to static values
-        # Assigning Value2 = Value2 replaces all formulas with their results in-place
-        # without using the clipboard, which avoids the "copy/paste area not same size"
-        # error that occurs when merged cells are present in the used range.
+        # SpecialCells(-4123) = xlCellTypeFormulas selects only formula cells so we
+        # never allocate a single array covering the whole used range (which OOMs on
+        # large sheets).  Each Area is a small contiguous block; Value2=Value2 on each
+        # Area replaces formulas in-place without the clipboard, so merged cells are
+        # handled correctly.  SpecialCells throws when no formula cells exist — caught
+        # by the inner try/catch and treated as "nothing to do".
         try {
             $usedRng = $ws.UsedRange
-            $usedRng.Value2 = $usedRng.Value2
+            try {
+                $fCells = $usedRng.SpecialCells(-4123)   # xlCellTypeFormulas
+                foreach ($area in $fCells.Areas) {
+                    $area.Value2 = $area.Value2
+                    Release-Com $area
+                }
+                Release-Com $fCells
+            } catch {
+                # No formula cells found on this sheet — nothing to flatten.
+            }
             $counts["Formulas Flattened"]++
             Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
