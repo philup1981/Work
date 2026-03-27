@@ -64,7 +64,7 @@ $XL_SHEET_HIDDEN      =  0   # xlSheetHidden
 $XL_SHEET_VERY_HIDDEN =  2   # xlSheetVeryHidden
 $XL_EXCEL_LINKS       =  1   # xlExcelLinks  (LinkSources type)
 $XL_CELL_FORMULAS     = -4123 # xlCellTypeFormulas (SpecialCells type)
-$XL_WORKSHEET         =  1   # xlWorksheet
+$XL_WORKSHEET         = -4167 # xlWorksheet (XlSheetType enum)
 
 # Supported Microsoft spreadsheet file extensions
 $SUPPORTED_EXTENSIONS = @(
@@ -341,9 +341,28 @@ function Invoke-WorkbookInspection {
         }
 
         # -----------------------------------------------------------------
+        # CHECK 2 : Workbook-level pivot caches
+        # PivotCaches() is the most reliable pivot-table indicator — every
+        # pivot table, on any sheet, registers a cache at workbook level.
+        # -----------------------------------------------------------------
+        Write-Log "  [CHECK 2] Workbook-level pivot caches..." -Level DEBUG
+        try {
+            $pivotCaches = $wb.PivotCaches()
+            if ($null -ne $pivotCaches -and $pivotCaches.Count -gt 0) {
+                $r.HasPivotTables = $true
+                Write-Log "  Workbook has $($pivotCaches.Count) pivot cache(s) - pivot table(s) confirmed at workbook level" -Level WARN
+            } else {
+                Write-Log "  No pivot caches found at workbook level." -Level DEBUG
+            }
+            Release-ComObject $pivotCaches
+        } catch {
+            Write-Log "  Could not check workbook pivot caches (non-fatal, will check per-sheet) : $($_.Exception.Message)" -Level WARN
+        }
+
+        # -----------------------------------------------------------------
         # PER-SHEET INSPECTION
         # -----------------------------------------------------------------
-        Write-Log "  [CHECK 2-5] Inspecting $sheetCount sheet(s) for hidden status, formulas, rows/columns, and pivot tables..." -Level DEBUG
+        Write-Log "  [CHECK 3-6] Inspecting $sheetCount sheet(s) for hidden status, pivot tables, formulas, rows/columns..." -Level DEBUG
 
         foreach ($sheet in $wb.Sheets) {
             $sName = $sheet.Name
@@ -374,8 +393,8 @@ function Invoke-WorkbookInspection {
                 continue
             }
 
-            # --- CHECK 2 : Pivot tables -------------------------------------
-            Write-Log "    [CHECK 2] '$sName' - pivot tables..." -Level DEBUG
+            # --- CHECK 3 : Pivot tables (per-sheet detail) ------------------
+            Write-Log "    [CHECK 3] '$sName' - pivot tables (per-sheet)..." -Level DEBUG
             try {
                 $ptCount = $sheet.PivotTables().Count
                 if ($ptCount -gt 0) {
@@ -403,8 +422,8 @@ function Invoke-WorkbookInspection {
             $usedCols = $usedRange.Columns.Count
             Write-Log "    Used range: $usedRows row(s) x $usedCols column(s)" -Level DEBUG
 
-            # --- CHECK 3 : Formulas -----------------------------------------
-            Write-Log "    [CHECK 3] '$sName' - formulas..." -Level DEBUG
+            # --- CHECK 4 : Formulas -----------------------------------------
+            Write-Log "    [CHECK 4] '$sName' - formulas..." -Level DEBUG
             try {
                 # SpecialCells throws a COMException (not a PowerShell error) when no
                 # matching cells exist - that is the expected "no formulas" signal.
@@ -422,9 +441,9 @@ function Invoke-WorkbookInspection {
                 Write-Log "    [FORMULAS] '$sName'  -  check failed (non-fatal) : $($_.Exception.Message)" -Level WARN
             }
 
-            # --- CHECK 4 : Hidden rows (within used range) ------------------
+            # --- CHECK 5 : Hidden rows (within used range) ------------------
             if ($usedRows -gt 0) {
-                Write-Log "    [CHECK 4] '$sName' - scanning $usedRows row(s) for hidden status..." -Level DEBUG
+                Write-Log "    [CHECK 5] '$sName' - scanning $usedRows row(s) for hidden status..." -Level DEBUG
                 $hiddenRowCount = 0
                 try {
                     for ($ri = 1; $ri -le $usedRows; $ri++) {
@@ -445,9 +464,9 @@ function Invoke-WorkbookInspection {
                 }
             }
 
-            # --- CHECK 5 : Hidden columns (within used range) ---------------
+            # --- CHECK 6 : Hidden columns (within used range) ---------------
             if ($usedCols -gt 0) {
-                Write-Log "    [CHECK 5] '$sName' - scanning $usedCols column(s) for hidden status..." -Level DEBUG
+                Write-Log "    [CHECK 6] '$sName' - scanning $usedCols column(s) for hidden status..." -Level DEBUG
                 $hiddenColCount = 0
                 try {
                     for ($ci = 1; $ci -le $usedCols; $ci++) {
