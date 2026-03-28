@@ -15,10 +15,12 @@
       - Removes hidden rows and columns (within used range)
       - Removes hidden ListObjects (tables)
       - Runs a QC pass to verify no residual hidden content
-      - Saves cleaned files to Output\Passed\ (QC passed) or Output\Failed_QC\ (QC issues),
-        using the original filename (macro-enabled files are saved with .xlsx extension)
+      - Saves cleaned files to <source folder>\Output\Passed\ (QC passed) or
+        <source folder>\Output\Failed_QC\ (QC issues), using the original filename
+        (macro-enabled files are saved with .xlsx extension)
 
-    Results.txt (per-file detail + grand totals) and Error.txt are written to the Output folder.
+    Results.txt (per-file detail + grand totals) and Error.txt are written to
+    <source folder>\Output\.
     Excel COM is restarted every 25 files to prevent memory pressure on large batches (100+ files).
 
 .NOTES
@@ -786,10 +788,9 @@ $excelFiles | ForEach-Object { Write-Host "  - $($_.Name)" }
 Write-Host ""
 
 # ---------------------------------------------------------------------------
-# Build Output folder - one level above the source folder
+# Build Output folders - inside the source folder, at the same level as the files
 # ---------------------------------------------------------------------------
-$parentDir   = Split-Path $FolderPath -Parent
-$outputDir   = Join-Path $parentDir "Output"
+$outputDir   = Join-Path $FolderPath "Output"
 $passedDir   = Join-Path $outputDir "Passed"
 $failedQcDir = Join-Path $outputDir "Failed_QC"
 
