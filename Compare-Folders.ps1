@@ -29,7 +29,7 @@ function Write-Log {
         try {
             Add-Content -Path $script:LogPath -Value $logEntry -ErrorAction Stop
         } catch {
-            # Cannot write to log — print to console only, do NOT open anything
+            # Cannot write to log - print to console only, do NOT open anything
             Write-Host "[$timestamp] [WARNING] Unable to write to log file '$($script:LogPath)': $($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
@@ -47,20 +47,16 @@ function Test-FolderAccessible {
                 Select-Object -First 1
         return $true
     } catch [System.UnauthorizedAccessException] {
-        Write-Log "ACCESS DENIED to folder: '$FolderPath'. " +
-                  "Ensure the account '$($env:USERDOMAIN)\$($env:USERNAME)' has at least Read permission." `
-                  -Level ERROR
+        Write-Log "ACCESS DENIED to folder: '$FolderPath'. Ensure the account '$($env:USERDOMAIN)\$($env:USERNAME)' has at least Read permission." -Level ERROR
         return $false
     } catch [System.IO.DirectoryNotFoundException] {
-        Write-Log "DIRECTORY NOT FOUND: '$FolderPath'. " +
-                  "Verify the path exists and is reachable (check VPN / network share availability)." `
-                  -Level ERROR
+        Write-Log "DIRECTORY NOT FOUND: '$FolderPath'. Verify the path exists and is reachable (check VPN / network share availability)." -Level ERROR
         return $false
     } catch [System.IO.IOException] {
         Write-Log "I/O ERROR accessing '$FolderPath': $($_.Exception.Message)" -Level ERROR
         return $false
     } catch {
-        Write-Log "UNEXPECTED ERROR accessing '$FolderPath': $($_.Exception.GetType().Name) — $($_.Exception.Message)" -Level ERROR
+        Write-Log "UNEXPECTED ERROR accessing '$FolderPath': $($_.Exception.GetType().Name) - $($_.Exception.Message)" -Level ERROR
         return $false
     }
 }
@@ -94,7 +90,7 @@ function Get-FileBaseNames {
         # Report every item-level error without stopping
         foreach ($ie in $itemErrors) {
             $errorCount++
-            Write-Log "[$ScanLabel] Could not enumerate item — $($ie.Exception.Message)" -Level WARNING
+            Write-Log "[$ScanLabel] Could not enumerate item - $($ie.Exception.Message)" -Level WARNING
         }
 
         foreach ($file in $allFiles) {
@@ -110,8 +106,7 @@ function Get-FileBaseNames {
                 $fileCount++
             } catch {
                 $errorCount++
-                Write-Log "[$ScanLabel] Error processing file '$($file.FullName)': " +
-                          "$($_.Exception.GetType().Name) — $($_.Exception.Message)" -Level ERROR
+                Write-Log "[$ScanLabel] Error processing file '$($file.FullName)': $($_.Exception.GetType().Name) - $($_.Exception.Message)" -Level ERROR
             }
         }
     } catch [System.UnauthorizedAccessException] {
@@ -119,8 +114,7 @@ function Get-FileBaseNames {
     } catch [System.IO.IOException] {
         Write-Log "[$ScanLabel] I/O ERROR during scan of '$FolderPath': $($_.Exception.Message)" -Level ERROR
     } catch {
-        Write-Log "[$ScanLabel] CRITICAL ERROR during scan of '$FolderPath': " +
-                  "$($_.Exception.GetType().Name) — $($_.Exception.Message)" -Level ERROR
+        Write-Log "[$ScanLabel] CRITICAL ERROR during scan of '$FolderPath': $($_.Exception.GetType().Name) - $($_.Exception.Message)" -Level ERROR
     }
 
     Write-Log "[$ScanLabel] Enumeration finished. Files processed: $fileCount | Unique base names: $($baseNames.Count) | Errors: $errorCount"
@@ -133,7 +127,7 @@ function Get-FileBaseNames {
 
 Clear-Host
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "         FOLDER COMPARISON TOOL  —  Missing File Finder     " -ForegroundColor Cyan
+Write-Host "        FOLDER COMPARISON TOOL - Missing File Finder        " -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Running as : $($env:USERDOMAIN)\$($env:USERNAME)"          -ForegroundColor Yellow
@@ -141,19 +135,19 @@ Write-Host "  Date/Time  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"    -Foregr
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 1 — Collect folder paths from the user
+# Step 1 - Collect folder paths from the user
 # ----------------------------------------------------------------
 Write-Host "--- Step 1: Enter Folder Paths ---" -ForegroundColor Cyan
 
 do {
-    $folder1 = (Read-Host "  Folder Path 1 (SOURCE  — files to check)").Trim().TrimEnd('\')
+    $folder1 = (Read-Host "  Folder Path 1 (SOURCE  - files to check)").Trim().TrimEnd('\')
     if ([string]::IsNullOrWhiteSpace($folder1)) {
         Write-Host "  [ERROR] Folder Path 1 cannot be empty. Please enter a valid path." -ForegroundColor Red
     }
 } while ([string]::IsNullOrWhiteSpace($folder1))
 
 do {
-    $folder2 = (Read-Host "  Folder Path 2 (COMPARE — files to compare against)").Trim().TrimEnd('\')
+    $folder2 = (Read-Host "  Folder Path 2 (COMPARE - files to compare against)").Trim().TrimEnd('\')
     if ([string]::IsNullOrWhiteSpace($folder2)) {
         Write-Host "  [ERROR] Folder Path 2 cannot be empty. Please enter a valid path." -ForegroundColor Red
     }
@@ -162,7 +156,7 @@ do {
 Write-Host ""
 
 # ----------------------------------------------------------------
-# Step 2 — Validate that both paths exist and are directories
+# Step 2 - Validate that both paths exist and are directories
 # ----------------------------------------------------------------
 Write-Host "--- Step 2: Validating Folder Paths ---" -ForegroundColor Cyan
 
@@ -173,7 +167,7 @@ foreach ($entry in @(
     [pscustomobject]@{ Label = 'Folder 2 (Compare)'; Path = $folder2 }
 )) {
     if (-not (Test-Path -LiteralPath $entry.Path -PathType Container)) {
-        Write-Host "  [ERROR] $($entry.Label): Path not found or not a directory — '$($entry.Path)'" -ForegroundColor Red
+        Write-Host "  [ERROR] $($entry.Label): Path not found or not a directory - '$($entry.Path)'" -ForegroundColor Red
         Write-Host "          Check spelling, network connectivity, and that the share is mounted." -ForegroundColor Red
         $pathErrors = $true
     } else {
@@ -189,7 +183,7 @@ if ($pathErrors) {
 }
 
 # ----------------------------------------------------------------
-# Step 3 — Set up output directory and log file
+# Step 3 - Set up output directory and log file
 # ----------------------------------------------------------------
 Write-Host ""
 Write-Host "--- Step 3: Preparing Output Directory ---" -ForegroundColor Cyan
@@ -211,7 +205,7 @@ try {
         Write-Host "  [OK] Output directory already exists." -ForegroundColor Green
     }
 } catch [System.UnauthorizedAccessException] {
-    Write-Host "  [ERROR] ACCESS DENIED — cannot create output directory '$outputDir'." -ForegroundColor Red
+    Write-Host "  [ERROR] ACCESS DENIED - cannot create output directory '$outputDir'." -ForegroundColor Red
     Write-Host "          Ensure write permission exists one level above Folder 1." -ForegroundColor Red
     Read-Host "  Press Enter to exit"
     exit 1
@@ -229,7 +223,7 @@ Write-Log "Folder 2 Compare: $folder2"
 Write-Log "Output directory: $outputDir"
 
 # ----------------------------------------------------------------
-# Step 4 — Permission pre-flight check on both folders
+# Step 4 - Permission pre-flight check on both folders
 # ----------------------------------------------------------------
 Write-Host ""
 Write-Host "--- Step 4: Checking Read Permissions ---" -ForegroundColor Cyan
@@ -253,7 +247,7 @@ Write-Host "  [OK] Read access confirmed for both folders." -ForegroundColor Gre
 Write-Log "Permission pre-flight checks passed."
 
 # ----------------------------------------------------------------
-# Step 5 — Primary scan
+# Step 5 - Primary scan
 # ----------------------------------------------------------------
 Write-Host ""
 Write-Host "--- Step 5: PRIMARY SCAN ---" -ForegroundColor Cyan
@@ -270,10 +264,10 @@ foreach ($name in $primaryF1Names) {
 }
 
 Write-Log "=== PRIMARY SCAN COMPLETE === Missing count: $($primaryMissing.Count)"
-Write-Host "  Primary scan — files missing from Folder 2: $($primaryMissing.Count)" -ForegroundColor White
+Write-Host "  Primary scan - files missing from Folder 2: $($primaryMissing.Count)" -ForegroundColor White
 
 # ----------------------------------------------------------------
-# Step 6 — QC (verification) scan
+# Step 6 - QC (verification) scan
 # ----------------------------------------------------------------
 Write-Host ""
 Write-Host "--- Step 6: QC VERIFICATION SCAN ---" -ForegroundColor Cyan
@@ -290,10 +284,10 @@ foreach ($name in $qcF1Names) {
 }
 
 Write-Log "=== QC VERIFICATION SCAN COMPLETE === Missing count: $($qcMissing.Count)"
-Write-Host "  QC scan        — files missing from Folder 2: $($qcMissing.Count)" -ForegroundColor White
+Write-Host "  QC scan        - files missing from Folder 2: $($qcMissing.Count)" -ForegroundColor White
 
 # ----------------------------------------------------------------
-# Step 7 — Reconcile primary vs QC results
+# Step 7 - Reconcile primary vs QC results
 # ----------------------------------------------------------------
 Write-Host ""
 Write-Host "--- Step 7: Reconciling Scan Results ---" -ForegroundColor Cyan
@@ -324,13 +318,13 @@ if ($onlyInPrimary -or $onlyInQC) {
     foreach ($n in $qcMissing) { $null = $finalSet.Add($n) }
     $finalMissing = $finalSet | Sort-Object
 } else {
-    Write-Log "Scans are consistent — no discrepancies found."
+    Write-Log "Scans are consistent - no discrepancies found."
     Write-Host "  [OK] Both scans agree. Results are consistent." -ForegroundColor Green
     $finalMissing = $primaryMissing | Sort-Object
 }
 
 # ----------------------------------------------------------------
-# Step 8 — Write Missing.txt report
+# Step 8 - Write Missing.txt report
 # ----------------------------------------------------------------
 Write-Host ""
 Write-Host "--- Step 8: Writing Report ---" -ForegroundColor Cyan
@@ -381,11 +375,11 @@ try {
     Write-Host "  [OK] Report saved: $outputFile" -ForegroundColor Green
 
 } catch [System.UnauthorizedAccessException] {
-    Write-Log "ACCESS DENIED — cannot write report file '$outputFile': $($_.Exception.Message)" -Level ERROR
+    Write-Log "ACCESS DENIED - cannot write report file '$outputFile': $($_.Exception.Message)" -Level ERROR
 } catch [System.IO.IOException] {
     Write-Log "I/O ERROR writing report '$outputFile': $($_.Exception.Message)" -Level ERROR
 } catch {
-    Write-Log "UNEXPECTED ERROR writing report '$outputFile': $($_.Exception.GetType().Name) — $($_.Exception.Message)" -Level ERROR
+    Write-Log "UNEXPECTED ERROR writing report '$outputFile': $($_.Exception.GetType().Name) - $($_.Exception.Message)" -Level ERROR
 }
 
 # ----------------------------------------------------------------
