@@ -155,7 +155,10 @@ function Find-Duplicates {
         }
     }
 
-    return ($duplicates | Sort-Object)
+    # Always return a string array (never $null) so callers can safely
+    # pass the result to HashSet constructors and Count checks.
+    [string[]]$sorted = @($duplicates | Sort-Object)
+    return ,$sorted
 }
 
 #endregion ---- Helper Functions ----------------------------------------------
@@ -312,10 +315,10 @@ Write-Host '   CROSS-CHECK: PRIMARY vs QC' -ForegroundColor Cyan
 Write-Host ('=' * 60) -ForegroundColor Cyan
 
 $primarySet = [System.Collections.Generic.HashSet[string]]::new(
-    $primaryDuplicates, [System.StringComparer]::OrdinalIgnoreCase
+    [string[]]@($primaryDuplicates), [System.StringComparer]::OrdinalIgnoreCase
 )
 $qcSet = [System.Collections.Generic.HashSet[string]]::new(
-    $qcDuplicates, [System.StringComparer]::OrdinalIgnoreCase
+    [string[]]@($qcDuplicates), [System.StringComparer]::OrdinalIgnoreCase
 )
 
 # Items in primary but not QC
