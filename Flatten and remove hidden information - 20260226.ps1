@@ -385,79 +385,101 @@ function Invoke-ProcessWorkbook {
         } catch {}
 
         # D4: Remove hidden rows
-        # Scan to build a Union of all hidden rows, then delete in one operation.
-        # This is O(n) instead of the O(n^2) caused by shifting rows after each
-        # individual Delete() call.
+        # Loops until no hidden rows remain (up to $maxPasses).  A single pass may not
+        # catch everything because deleting rows can cause Excel to recalculate UsedRange
+        # and expose previously out-of-range hidden rows.  Within each pass a Union is
+        # built so only one Delete() call is made regardless of how many rows are hidden.
         try {
-            $usedRange      = $ws.UsedRange
-            $firstRow       = $usedRange.Row
-            $lastRow        = $firstRow + $usedRange.Rows.Count - 1
-            $hiddenRowUnion = $null
-            $hiddenRowCount = 0
+            $maxPasses       = 10
+            $totalHiddenRows = 0
+            for ($pass = 1; $pass -le $maxPasses; $pass++) {
+                $usedRange      = $ws.UsedRange
+                $firstRow       = $usedRange.Row
+                $lastRow        = $firstRow + $usedRange.Rows.Count - 1
+                $hiddenRowUnion = $null
+                $hiddenRowCount = 0
+                Release-Com $usedRange
 
-            for ($r = $firstRow; $r -le $lastRow; $r++) {
-                try {
-                    $rObj = $ws.Rows.Item($r)
-                    if ($rObj.Hidden) {
-                        $hiddenRowCount++
-                        $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rObj } else { $Excel.Union($hiddenRowUnion, $rObj) }
-                    } else {
-                        Release-Com $rObj
-                    }
-                } catch {}
-            }
-            Write-Log $ResultsFile "      Hidden rows found: $hiddenRowCount"
-            if ($null -ne $hiddenRowUnion) {
+                for ($r = $firstRow; $r -le $lastRow; $r++) {
+                    try {
+                        $rObj = $ws.Rows.Item($r)
+                        if ($rObj.Hidden) {
+                            $hiddenRowCount++
+                            $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rObj } else { $Excel.Union($hiddenRowUnion, $rObj) }
+                        } else {
+                            Release-Com $rObj
+                        }
+                    } catch {}
+                }
+
+                if ($hiddenRowCount -eq 0) { break }   # clean — no more passes needed
+
                 try {
                     $hiddenRowUnion.Delete()
-                    $counts["Hidden Rows Removed"] += $hiddenRowCount
-                    Write-Log $ResultsFile "      Removed $hiddenRowCount hidden row(s)."
+                    $totalHiddenRows += $hiddenRowCount
                 } catch {
-                    $msg = "      Error deleting hidden rows in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
+                    $msg = "      Error deleting hidden rows (pass $pass) in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                    break
+                } finally {
+                    Release-Com $hiddenRowUnion
                 }
-                Release-Com $hiddenRowUnion
             }
-            Release-Com $usedRange
+            $counts["Hidden Rows Removed"] += $totalHiddenRows
+            if ($totalHiddenRows -gt 0) {
+                Write-Log $ResultsFile "      Removed $totalHiddenRows hidden row(s)."
+            } else {
+                Write-Log $ResultsFile "      Hidden rows found: 0"
+            }
         } catch {
             $msg = "      Error processing hidden rows in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
         # D5: Remove hidden columns
-        # Same union-then-delete approach as D4 — one Delete() call regardless of
-        # how many hidden columns exist.
+        # Same multi-pass union-then-delete approach as D4.
         try {
-            $usedRange      = $ws.UsedRange
-            $firstCol       = $usedRange.Column
-            $lastCol        = $firstCol + $usedRange.Columns.Count - 1
-            $hiddenColUnion = $null
-            $hiddenColCount = 0
+            $maxPasses       = 10
+            $totalHiddenCols = 0
+            for ($pass = 1; $pass -le $maxPasses; $pass++) {
+                $usedRange      = $ws.UsedRange
+                $firstCol       = $usedRange.Column
+                $lastCol        = $firstCol + $usedRange.Columns.Count - 1
+                $hiddenColUnion = $null
+                $hiddenColCount = 0
+                Release-Com $usedRange
 
-            for ($c = $firstCol; $c -le $lastCol; $c++) {
-                try {
-                    $cObj = $ws.Columns.Item($c)
-                    if ($cObj.Hidden) {
-                        $hiddenColCount++
-                        $hiddenColUnion = if ($null -eq $hiddenColUnion) { $cObj } else { $Excel.Union($hiddenColUnion, $cObj) }
-                    } else {
-                        Release-Com $cObj
-                    }
-                } catch {}
-            }
-            Write-Log $ResultsFile "      Hidden columns found: $hiddenColCount"
-            if ($null -ne $hiddenColUnion) {
+                for ($c = $firstCol; $c -le $lastCol; $c++) {
+                    try {
+                        $cObj = $ws.Columns.Item($c)
+                        if ($cObj.Hidden) {
+                            $hiddenColCount++
+                            $hiddenColUnion = if ($null -eq $hiddenColUnion) { $cObj } else { $Excel.Union($hiddenColUnion, $cObj) }
+                        } else {
+                            Release-Com $cObj
+                        }
+                    } catch {}
+                }
+
+                if ($hiddenColCount -eq 0) { break }   # clean — no more passes needed
+
                 try {
                     $hiddenColUnion.Delete()
-                    $counts["Hidden Columns Removed"] += $hiddenColCount
-                    Write-Log $ResultsFile "      Removed $hiddenColCount hidden column(s)."
+                    $totalHiddenCols += $hiddenColCount
                 } catch {
-                    $msg = "      Error deleting hidden columns in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
+                    $msg = "      Error deleting hidden columns (pass $pass) in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+                    break
+                } finally {
+                    Release-Com $hiddenColUnion
                 }
-                Release-Com $hiddenColUnion
             }
-            Release-Com $usedRange
+            $counts["Hidden Columns Removed"] += $totalHiddenCols
+            if ($totalHiddenCols -gt 0) {
+                Write-Log $ResultsFile "      Removed $totalHiddenCols hidden column(s)."
+            } else {
+                Write-Log $ResultsFile "      Hidden columns found: 0"
+            }
         } catch {
             $msg = "      Error processing hidden columns in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
