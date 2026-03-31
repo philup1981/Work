@@ -275,6 +275,14 @@ function Invoke-ProcessWorkbook {
             Write-Log $ResultsFile "      WARNING: Sheet '$shName' is password-protected and could not be unprotected; some operations may fail"
         }
 
+        # Remove AutoFilter and clear outline groups before any processing.
+        # AutoFilter-hidden rows report .Hidden = True; if the filter is left active it
+        # re-evaluates after each deletion pass and continuously hides more rows, making
+        # the hidden-row removal loop never converge.  Clearing outlines ensures
+        # outline-collapsed rows/columns also report correctly.
+        try { if ($ws.AutoFilterMode) { $ws.AutoFilterMode = $false } } catch {}
+        try { $ws.Cells.ClearOutline() } catch {}
+
         # D1: Flatten pivot tables
         try {
             $ptCount = $ws.PivotTables().Count
