@@ -412,34 +412,38 @@ function Invoke-ProcessWorkbook {
         }
 
         # D4: Remove hidden rows
+        # Scan to build a Union of all hidden rows, then delete in one operation.
+        # This is O(n) instead of the O(n^2) caused by shifting rows after each
+        # individual Delete() call.
         try {
-            $usedRange        = $ws.UsedRange
-            $firstRow         = $usedRange.Row
-            $lastRow          = $firstRow + $usedRange.Rows.Count - 1
-            $hiddenRowIndices = [System.Collections.Generic.List[int]]::new()
+            $usedRange      = $ws.UsedRange
+            $firstRow       = $usedRange.Row
+            $lastRow        = $firstRow + $usedRange.Rows.Count - 1
+            $hiddenRowUnion = $null
+            $hiddenRowCount = 0
 
             for ($r = $firstRow; $r -le $lastRow; $r++) {
                 try {
                     $rObj = $ws.Rows.Item($r)
-                    if ($rObj.Hidden) { $hiddenRowIndices.Add($r) }
-                    Release-Com $rObj
+                    if ($rObj.Hidden) {
+                        $hiddenRowCount++
+                        $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rObj } else { $Excel.Union($hiddenRowUnion, $rObj) }
+                    } else {
+                        Release-Com $rObj
+                    }
                 } catch {}
             }
-            Write-Log $ResultsFile "      Hidden rows found: $($hiddenRowIndices.Count)"
-            $hiddenRowIndices.Reverse()
-            foreach ($ri in $hiddenRowIndices) {
+            Write-Log $ResultsFile "      Hidden rows found: $hiddenRowCount"
+            if ($null -ne $hiddenRowUnion) {
                 try {
-                    $rObj = $ws.Rows.Item($ri)
-                    $rObj.Delete()
-                    $counts["Hidden Rows Removed"]++
-                    Release-Com $rObj
+                    $hiddenRowUnion.Delete()
+                    $counts["Hidden Rows Removed"] += $hiddenRowCount
+                    Write-Log $ResultsFile "      Removed $hiddenRowCount hidden row(s)."
                 } catch {
-                    $msg = "      Error deleting hidden row $ri in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
+                    $msg = "      Error deleting hidden rows in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
-            }
-            if ($hiddenRowIndices.Count -gt 0) {
-                Write-Log $ResultsFile "      Removed $($hiddenRowIndices.Count) hidden row(s)."
+                Release-Com $hiddenRowUnion
             }
             Release-Com $usedRange
         } catch {
@@ -448,34 +452,37 @@ function Invoke-ProcessWorkbook {
         }
 
         # D5: Remove hidden columns
+        # Same union-then-delete approach as D4 — one Delete() call regardless of
+        # how many hidden columns exist.
         try {
-            $usedRange        = $ws.UsedRange
-            $firstCol         = $usedRange.Column
-            $lastCol          = $firstCol + $usedRange.Columns.Count - 1
-            $hiddenColIndices = [System.Collections.Generic.List[int]]::new()
+            $usedRange      = $ws.UsedRange
+            $firstCol       = $usedRange.Column
+            $lastCol        = $firstCol + $usedRange.Columns.Count - 1
+            $hiddenColUnion = $null
+            $hiddenColCount = 0
 
             for ($c = $firstCol; $c -le $lastCol; $c++) {
                 try {
                     $cObj = $ws.Columns.Item($c)
-                    if ($cObj.Hidden) { $hiddenColIndices.Add($c) }
-                    Release-Com $cObj
+                    if ($cObj.Hidden) {
+                        $hiddenColCount++
+                        $hiddenColUnion = if ($null -eq $hiddenColUnion) { $cObj } else { $Excel.Union($hiddenColUnion, $cObj) }
+                    } else {
+                        Release-Com $cObj
+                    }
                 } catch {}
             }
-            Write-Log $ResultsFile "      Hidden columns found: $($hiddenColIndices.Count)"
-            $hiddenColIndices.Reverse()
-            foreach ($ci in $hiddenColIndices) {
+            Write-Log $ResultsFile "      Hidden columns found: $hiddenColCount"
+            if ($null -ne $hiddenColUnion) {
                 try {
-                    $cObj = $ws.Columns.Item($ci)
-                    $cObj.Delete()
-                    $counts["Hidden Columns Removed"]++
-                    Release-Com $cObj
+                    $hiddenColUnion.Delete()
+                    $counts["Hidden Columns Removed"] += $hiddenColCount
+                    Write-Log $ResultsFile "      Removed $hiddenColCount hidden column(s)."
                 } catch {
-                    $msg = "      Error deleting hidden column $ci in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
+                    $msg = "      Error deleting hidden columns in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
                     Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
                 }
-            }
-            if ($hiddenColIndices.Count -gt 0) {
-                Write-Log $ResultsFile "      Removed $($hiddenColIndices.Count) hidden column(s)."
+                Release-Com $hiddenColUnion
             }
             Release-Com $usedRange
         } catch {
