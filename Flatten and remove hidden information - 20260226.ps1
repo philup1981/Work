@@ -265,6 +265,17 @@ function Invoke-ProcessWorkbook {
             continue
         }
 
+        # Unprotect the sheet so that all operations (delete rows/cols, pivot flatten, etc.) succeed.
+        # The output is a sanitised copy so sheet protection is intentionally not restored.
+        try {
+            if ($ws.ProtectContents -or $ws.ProtectDrawingObjects -or $ws.ProtectScenarios) {
+                $ws.Unprotect()
+                Write-Log $ResultsFile "      Sheet unprotected (no password)"
+            }
+        } catch {
+            Write-Log $ResultsFile "      WARNING: Sheet '$shName' is password-protected and could not be unprotected; some operations may fail"
+        }
+
         # D1: Flatten pivot tables
         try {
             $ptCount = $ws.PivotTables().Count
