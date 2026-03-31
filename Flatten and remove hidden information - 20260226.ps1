@@ -79,7 +79,6 @@ function New-FileCounts {
     return [ordered]@{
         "Pivot Tables Flattened"                   = 0
         "Formulas Flattened"                       = 0
-        "Charts Converted to Images"               = 0
         "Macro Modules Removed"                    = 0
         "External Connections Removed"             = 0
         "Named Ranges Pointing Externally Removed" = 0
@@ -375,41 +374,15 @@ function Invoke-ProcessWorkbook {
             Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
         }
 
-        # D3: Convert charts to static images
+        # D3: Charts are left in place.
+        # CopyPicture/Paste conversion is unreliable across chart types and Excel
+        # versions ("cannot paste the data").  Charts are retained as-is in the output.
         try {
             $coCount = $ws.ChartObjects().Count
-            Write-Log $ResultsFile "      Chart objects found: $coCount"
-            for ($ch = $coCount; $ch -ge 1; $ch--) {
-                try {
-                    $co     = $ws.ChartObjects($ch)
-                    $coName = $co.Name
-                    $coLeft = $co.Left; $coTop = $co.Top
-                    $coW    = $co.Width; $coH  = $co.Height
-
-                    $co.CopyPicture(1, -4147)   # xlScreen, xlPicture
-                    $ws.Paste()
-                    # Note: do NOT set $Excel.CutCopyMode here — the property only accepts
-                    # xlCopy/xlCut enum values; clearing it is unnecessary in automation
-                    # (DisplayAlerts=false suppresses any clipboard prompt on exit).
-
-                    $pic = $ws.Shapes.Item($ws.Shapes.Count)
-                    $pic.Left = $coLeft; $pic.Top  = $coTop
-                    $pic.Width= $coW;    $pic.Height= $coH
-                    Release-Com $pic
-
-                    $co.Delete()
-                    $counts["Charts Converted to Images"]++
-                    Write-Log $ResultsFile "      Converted chart to image: '$coName'"
-                    Release-Com $co
-                } catch {
-                    $msg = "      Error converting chart $ch in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
-                    Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
-                }
+            if ($coCount -gt 0) {
+                Write-Log $ResultsFile "      Chart objects found: $coCount (left as-is)"
             }
-        } catch {
-            $msg = "      Error accessing charts in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
-            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
-        }
+        } catch {}
 
         # D4: Remove hidden rows
         # Scan to build a Union of all hidden rows, then delete in one operation.
@@ -590,13 +563,7 @@ function Invoke-ProcessWorkbook {
                 }
             } catch {}
 
-            try {
-                $coQC = $sh.ChartObjects().Count
-                if ($coQC -gt 0) {
-                    $issue = "QC ISSUE: Sheet '$shQC' still has $coQC chart object(s)."
-                    $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
-                }
-            } catch {}
+            # Chart objects are intentionally left in place — no QC check for charts.
 
             try {
                 $ur     = $sh.UsedRange
