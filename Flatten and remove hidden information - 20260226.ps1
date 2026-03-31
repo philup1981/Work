@@ -392,6 +392,13 @@ function Invoke-ProcessWorkbook {
             }
         } catch {}
 
+        # Re-clear AutoFilter and outlines immediately before the hidden row/column steps.
+        # Pivot table flattening (D1) can re-enable AutoFilter on the sheet because pivot
+        # tables use AutoFilter internally; if that filter is left active it continuously
+        # re-hides rows after each deletion pass, preventing convergence.
+        try { if ($ws.AutoFilterMode) { $ws.AutoFilterMode = $false } } catch {}
+        try { $ws.Cells.ClearOutline() } catch {}
+
         # D4: Remove hidden rows
         # Loops until no hidden rows remain (up to $maxPasses).  A single pass may not
         # catch everything because deleting rows can cause Excel to recalculate UsedRange
