@@ -379,6 +379,8 @@ function Invoke-ProcessWorkbook {
             $searchRng = $usedRng
             $trimmed   = $false
             try {
+                # Trim to true last content cell so SpecialCells does not scan empty rows
+                # beyond the data (UsedRange can be inflated by stray formatting).
                 # xlFormulas=-4144, xlPart=2, xlByRows=1, xlPrevious=2
                 $lastContent = $ws.Cells.Find("*", $ws.Cells(1,1), -4144, 2, 1, 2)
                 if ($null -ne $lastContent) {
@@ -388,26 +390,18 @@ function Invoke-ProcessWorkbook {
                 }
             } catch {}
             try {
-                # Bulk read/write on the trimmed range: reads the entire range as a 2D
-                # array in one COM call and writes it back in one COM call.  This replaces
-                # all formula cells with their calculated values in exactly 2 COM calls
-                # regardless of how many formula cells exist or how scattered they are.
-                # Empty and value cells round-trip safely (no data change).
-                $searchRng.Value2 = $searchRng.Value2
-            } catch {
-                # Bulk assignment can fail when the range contains array formulas whose
-                # span extends outside the trimmed range.  Fall back to SpecialCells
-                # per-area so non-array formulas are still flattened.
-                try {
-                    $fCells = $searchRng.SpecialCells(-4123)   # xlCellTypeFormulas
-                    foreach ($area in $fCells.Areas) {
-                        try { $area.Value2 = $area.Value2 } catch {}
-                        Release-Com $area
-                    }
-                    Release-Com $fCells
-                } catch {
-                    # No formula cells found on this sheet — nothing to flatten.
+                # SpecialCells(-4123) = xlCellTypeFormulas — targets only formula cells so
+                # only formula-cell data is marshalled through COM, not the whole range.
+                # Per-area Value2=Value2 replaces each formula with its calculated value.
+                # SpecialCells throws when no formula cells exist — caught and ignored.
+                $fCells = $searchRng.SpecialCells(-4123)
+                foreach ($area in $fCells.Areas) {
+                    try { $area.Value2 = $area.Value2 } catch {}
+                    Release-Com $area
                 }
+                Release-Com $fCells
+            } catch {
+                # No formula cells on this sheet — nothing to flatten.
             }
             if ($trimmed) { Release-Com $searchRng }
             $counts["Formulas Flattened"]++
