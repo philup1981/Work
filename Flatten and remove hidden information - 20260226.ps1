@@ -4,13 +4,13 @@
     Flattens Excel workbook content and removes hidden items across an entire folder of spreadsheets.
 
 .DESCRIPTION
-    Prompts the user for a folder path, then for every Excel file (.xlsx / .xlsm / .xls) found
+    Prompts the user for a folder path, then for every Excel file (.xlsx / .xlsm / .xlsb / .xls) found
     directly in that folder:
       - Flattens all pivot tables to static values (cell highlights and formatting preserved)
       - Converts chart objects to static images (position and size preserved)
       - Removes external data connections
       - Removes named ranges referencing external workbooks
-      - Strips VBA macros from macro-enabled workbooks (.xlsm); output saved as .xlsx
+      - Strips VBA macros from macro-enabled workbooks (.xlsm / .xlsb); output saved as .xlsx
       - Deletes hidden and very-hidden worksheets
       - Removes hidden rows and columns (within used range)
       - Removes hidden ListObjects (tables)
@@ -112,7 +112,7 @@ function Invoke-ProcessWorkbook {
     $counts    = New-FileCounts
     $errorList = [System.Collections.Generic.List[string]]::new()
     $fileItem  = Get-Item -LiteralPath $FilePath
-    $isMacroFile = $fileItem.Extension.ToLower() -eq ".xlsm"
+    $isMacroFile = $fileItem.Extension.ToLower() -in @(".xlsm", ".xlsb")
 
     # Excel visibility constants
     $xlSheetVisible    = -1
@@ -733,7 +733,7 @@ function Invoke-ProcessWorkbook {
     # STEP G0 - Strip VBA macros from macro-enabled workbooks (.xlsm)
     # -----------------------------------------------------------------------
     if ($isMacroFile) {
-        Write-Log $ResultsFile "  --- Stripping VBA macros (.xlsm) ---"
+        Write-Log $ResultsFile "  --- Stripping VBA macros ($($fileItem.Extension.ToLower())) ---"
         try {
             $vbp      = $workbook.VBProject
             # vbext_pp_locked = 1 means the VBProject is password-protected
@@ -800,7 +800,7 @@ function Invoke-ProcessWorkbook {
             [System.Reflection.Missing]::Value,
             $false
         )
-        $saveNote = if ($isMacroFile) { " (saved as .xlsx - macros eliminated)" } else { "" }
+        $saveNote = if ($isMacroFile) { " (saved as .xlsx - macros eliminated from $($fileItem.Extension.ToLower()))" } else { "" }
         Write-Log $ResultsFile "  Saved successfully$saveNote : $savePath"
     } catch {
         $msg = "  Could not save '$savePath' [$($fileItem.Name)]. Details: $($_.Exception.Message)"
@@ -870,11 +870,11 @@ Write-Host "Source folder : $FolderPath"
 # Discover Excel files
 # ---------------------------------------------------------------------------
 $excelFiles = @(Get-ChildItem -LiteralPath $FolderPath -File |
-    Where-Object { $_.Extension -match '^\.(xlsx|xlsm|xls)$' } |
+    Where-Object { $_.Extension -match '^\.(xlsx|xlsm|xlsb|xls)$' } |
     Sort-Object Name)
 
 if ($excelFiles.Count -eq 0) {
-    Write-Error "No Excel files (.xlsx, .xlsm, .xls) found in '$FolderPath'. Nothing to process."
+    Write-Error "No Excel files (.xlsx, .xlsm, .xlsb, .xls) found in '$FolderPath'. Nothing to process."
     exit 1
 }
 
