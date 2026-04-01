@@ -4,7 +4,7 @@
     Flattens Excel workbook content and removes hidden items across an entire folder of spreadsheets.
 
 .DESCRIPTION
-    Prompts the user for a folder path, then for every Excel file (.xlsx / .xlsm / .xlsb / .xls) found
+    Prompts the user for a folder path, then for every Excel file (.xlsx / .xlsm / .xlsb / .xls / .ods) found
     directly in that folder:
       - Flattens all pivot tables to static values (cell highlights and formatting preserved)
       - Converts chart objects to static images (position and size preserved)
@@ -782,8 +782,9 @@ function Invoke-ProcessWorkbook {
     Write-Log $ResultsFile "  --- Saving [$destLabel]: $savePath ---"
 
     $xlFileFormat = switch ($saveExt) {
-        ".xlsx" { 51 }   # xlOpenXMLWorkbook       — also strips any residual macros from xlsm
+        ".xlsx" { 51 }   # xlOpenXMLWorkbook       — also strips any residual macros from xlsm/xlsb
         ".xls"  { 56 }   # xlExcel8
+        ".ods"  { 60 }   # xlOpenDocumentSpreadsheet
         default { 51 }
     }
 
@@ -870,11 +871,11 @@ Write-Host "Source folder : $FolderPath"
 # Discover Excel files
 # ---------------------------------------------------------------------------
 $excelFiles = @(Get-ChildItem -LiteralPath $FolderPath -File |
-    Where-Object { $_.Extension -match '^\.(xlsx|xlsm|xlsb|xls)$' } |
+    Where-Object { $_.Extension -match '^\.(xlsx|xlsm|xlsb|xls|ods)$' } |
     Sort-Object Name)
 
 if ($excelFiles.Count -eq 0) {
-    Write-Error "No Excel files (.xlsx, .xlsm, .xlsb, .xls) found in '$FolderPath'. Nothing to process."
+    Write-Error "No Excel files (.xlsx, .xlsm, .xlsb, .xls, .ods) found in '$FolderPath'. Nothing to process."
     exit 1
 }
 
