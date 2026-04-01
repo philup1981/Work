@@ -388,14 +388,26 @@ function Invoke-ProcessWorkbook {
                 }
             } catch {}
             try {
-                $fCells = $searchRng.SpecialCells(-4123)   # xlCellTypeFormulas
-                foreach ($area in $fCells.Areas) {
-                    $area.Value2 = $area.Value2
-                    Release-Com $area
-                }
-                Release-Com $fCells
+                # Bulk read/write on the trimmed range: reads the entire range as a 2D
+                # array in one COM call and writes it back in one COM call.  This replaces
+                # all formula cells with their calculated values in exactly 2 COM calls
+                # regardless of how many formula cells exist or how scattered they are.
+                # Empty and value cells round-trip safely (no data change).
+                $searchRng.Value2 = $searchRng.Value2
             } catch {
-                # No formula cells found on this sheet — nothing to flatten.
+                # Bulk assignment can fail when the range contains array formulas whose
+                # span extends outside the trimmed range.  Fall back to SpecialCells
+                # per-area so non-array formulas are still flattened.
+                try {
+                    $fCells = $searchRng.SpecialCells(-4123)   # xlCellTypeFormulas
+                    foreach ($area in $fCells.Areas) {
+                        try { $area.Value2 = $area.Value2 } catch {}
+                        Release-Com $area
+                    }
+                    Release-Com $fCells
+                } catch {
+                    # No formula cells found on this sheet — nothing to flatten.
+                }
             }
             if ($trimmed) { Release-Com $searchRng }
             $counts["Formulas Flattened"]++
