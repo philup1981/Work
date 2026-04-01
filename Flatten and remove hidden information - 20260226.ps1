@@ -70,7 +70,9 @@ function New-ExcelInstance {
     $xl.DisplayAlerts          = $false
     $xl.AskToUpdateLinks       = $false
     $xl.AlertBeforeOverwriting = $false
-    $xl.AutomationSecurity     = 3   # msoAutomationSecurityForceDisable — prevents macros running on open
+    $xl.AutomationSecurity     = 3       # msoAutomationSecurityForceDisable — prevents macros running on open
+    $xl.ScreenUpdating         = $false  # suppress redraws between operations
+    $xl.EnableEvents           = $false  # suppress VBA event-handler overhead
     return $xl
 }
 
@@ -159,6 +161,12 @@ function Invoke-ProcessWorkbook {
     }
 
     Write-Log $ResultsFile "  Workbook opened successfully."
+
+    # Set Calculation=Manual now that a workbook is open (setting it on the Application
+    # before any workbook is loaded raises 0x800A03EC).  Then force one full recalc so
+    # all formula values are current before flattening.
+    try { $Excel.Calculation = -4135 } catch {}   # xlCalculationManual
+    try { $workbook.Calculate() }      catch {}
 
     # -----------------------------------------------------------------------
     # STEP A - Remove external data connections
@@ -404,6 +412,11 @@ function Invoke-ProcessWorkbook {
         # catch everything because deleting rows can cause Excel to recalculate UsedRange
         # and expose previously out-of-range hidden rows.  Within each pass a Union is
         # built so only one Delete() call is made regardless of how many rows are hidden.
+        #
+        # Hidden-row detection uses SpecialCells(xlCellTypeVisible=12) on a single-column
+        # slice of the used range.  Excel returns visible spans as Areas; gaps between
+        # consecutive areas are hidden row spans.  This replaces a per-row COM call with
+        # a single COM call — critical for sheets where UsedRange spans many empty rows.
         try {
             $maxPasses       = 10
             $totalHiddenRows = 0
@@ -411,20 +424,53 @@ function Invoke-ProcessWorkbook {
                 $usedRange      = $ws.UsedRange
                 $firstRow       = $usedRange.Row
                 $lastRow        = $firstRow + $usedRange.Rows.Count - 1
+                $firstCol       = $usedRange.Column
                 $hiddenRowUnion = $null
                 $hiddenRowCount = 0
                 Release-Com $usedRange
 
-                for ($r = $firstRow; $r -le $lastRow; $r++) {
-                    try {
-                        $rObj = $ws.Rows.Item($r)
-                        if ($rObj.Hidden) {
-                            $hiddenRowCount++
-                            $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rObj } else { $Excel.Union($hiddenRowUnion, $rObj) }
-                        } else {
-                            Release-Com $rObj
+                try {
+                    # Single-column slice — row visibility is a whole-row property so one
+                    # column is enough to detect all hidden rows.
+                    $colSlice     = $ws.Range($ws.Cells($firstRow, $firstCol), $ws.Cells($lastRow, $firstCol))
+                    $visibleCells = $colSlice.SpecialCells(12)   # xlCellTypeVisible
+                    Release-Com $colSlice
+
+                    # Areas are not guaranteed to be sorted; sort by row to walk gaps in order.
+                    $sortedAreas = @($visibleCells.Areas) | Sort-Object { $_.Row }
+                    Release-Com $visibleCells
+
+                    $cursor = $firstRow
+                    foreach ($area in $sortedAreas) {
+                        $aStart = $area.Row
+                        $aEnd   = $aStart + $area.Rows.Count - 1
+                        if ($aStart -gt $cursor) {
+                            # Rows $cursor..($aStart-1) are hidden — add as a single range.
+                            $hiddenRowCount += $aStart - $cursor
+                            $rng = $ws.Range($ws.Rows($cursor), $ws.Rows($aStart - 1))
+                            $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rng } else { $Excel.Union($hiddenRowUnion, $rng) }
                         }
-                    } catch {}
+                        $cursor = $aEnd + 1
+                        Release-Com $area
+                    }
+                    # Trailing hidden rows after the last visible area.
+                    if ($cursor -le $lastRow) {
+                        $hiddenRowCount += $lastRow - $cursor + 1
+                        $rng = $ws.Range($ws.Rows($cursor), $ws.Rows($lastRow))
+                        $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rng } else { $Excel.Union($hiddenRowUnion, $rng) }
+                    }
+                } catch {
+                    # SpecialCells throws when the sheet is entirely empty or all rows are
+                    # hidden.  Fall back to a per-row check.
+                    for ($r = $firstRow; $r -le $lastRow; $r++) {
+                        try {
+                            $rObj = $ws.Rows($r)
+                            if ($rObj.Hidden) {
+                                $hiddenRowCount++
+                                $hiddenRowUnion = if ($null -eq $hiddenRowUnion) { $rObj } else { $Excel.Union($hiddenRowUnion, $rObj) }
+                            } else { Release-Com $rObj }
+                        } catch {}
+                    }
                 }
 
                 if ($hiddenRowCount -eq 0) { break }   # clean — no more passes needed
@@ -452,28 +498,55 @@ function Invoke-ProcessWorkbook {
         }
 
         # D5: Remove hidden columns
-        # Same multi-pass union-then-delete approach as D4.
+        # Same SpecialCells gap approach as D4 but using a first-row slice so the Areas
+        # represent visible column spans; gaps are hidden column ranges.
         try {
             $maxPasses       = 10
             $totalHiddenCols = 0
             for ($pass = 1; $pass -le $maxPasses; $pass++) {
                 $usedRange      = $ws.UsedRange
+                $firstRow       = $usedRange.Row
                 $firstCol       = $usedRange.Column
                 $lastCol        = $firstCol + $usedRange.Columns.Count - 1
                 $hiddenColUnion = $null
                 $hiddenColCount = 0
                 Release-Com $usedRange
 
-                for ($c = $firstCol; $c -le $lastCol; $c++) {
-                    try {
-                        $cObj = $ws.Columns.Item($c)
-                        if ($cObj.Hidden) {
-                            $hiddenColCount++
-                            $hiddenColUnion = if ($null -eq $hiddenColUnion) { $cObj } else { $Excel.Union($hiddenColUnion, $cObj) }
-                        } else {
-                            Release-Com $cObj
+                try {
+                    $rowSlice     = $ws.Range($ws.Cells($firstRow, $firstCol), $ws.Cells($firstRow, $lastCol))
+                    $visibleCells = $rowSlice.SpecialCells(12)   # xlCellTypeVisible
+                    Release-Com $rowSlice
+
+                    $sortedAreas = @($visibleCells.Areas) | Sort-Object { $_.Column }
+                    Release-Com $visibleCells
+
+                    $cursor = $firstCol
+                    foreach ($area in $sortedAreas) {
+                        $aStart = $area.Column
+                        $aEnd   = $aStart + $area.Columns.Count - 1
+                        if ($aStart -gt $cursor) {
+                            $hiddenColCount += $aStart - $cursor
+                            $rng = $ws.Range($ws.Columns($cursor), $ws.Columns($aStart - 1))
+                            $hiddenColUnion = if ($null -eq $hiddenColUnion) { $rng } else { $Excel.Union($hiddenColUnion, $rng) }
                         }
-                    } catch {}
+                        $cursor = $aEnd + 1
+                        Release-Com $area
+                    }
+                    if ($cursor -le $lastCol) {
+                        $hiddenColCount += $lastCol - $cursor + 1
+                        $rng = $ws.Range($ws.Columns($cursor), $ws.Columns($lastCol))
+                        $hiddenColUnion = if ($null -eq $hiddenColUnion) { $rng } else { $Excel.Union($hiddenColUnion, $rng) }
+                    }
+                } catch {
+                    for ($c = $firstCol; $c -le $lastCol; $c++) {
+                        try {
+                            $cObj = $ws.Columns($c)
+                            if ($cObj.Hidden) {
+                                $hiddenColCount++
+                                $hiddenColUnion = if ($null -eq $hiddenColUnion) { $cObj } else { $Excel.Union($hiddenColUnion, $cObj) }
+                            } else { Release-Com $cObj }
+                        } catch {}
+                    }
                 }
 
                 if ($hiddenColCount -eq 0) { break }   # clean — no more passes needed
