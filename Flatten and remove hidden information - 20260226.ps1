@@ -88,6 +88,8 @@ function New-FileCounts {
         "Very Hidden Sheets Removed"               = 0
         "Hidden Rows Removed"                      = 0
         "Hidden Columns Removed"                   = 0
+        "Expanded Grouped Rows Removed"            = 0
+        "Expanded Grouped Columns Removed"         = 0
         "Hidden Tables (ListObjects) Removed"      = 0
         "QC Issues Found After Processing"         = 0
     }
@@ -283,7 +285,67 @@ function Invoke-ProcessWorkbook {
             Write-Log $ResultsFile "      WARNING: Sheet '$shName' is password-protected and could not be unprotected; some operations may fail"
         }
 
-        # Remove AutoFilter and clear outline groups before any processing.
+        # D0a: Delete expanded (visible) outline-grouped rows.
+        # OutlineLevel > 1 identifies rows inside an outline group that are currently
+        # expanded (not hidden).  This check MUST run before ClearOutline() because
+        # ClearOutline resets every row's OutlineLevel back to 1.
+        try {
+            $usedRange   = $ws.UsedRange
+            $firstRow    = $usedRange.Row
+            $lastRow     = $firstRow + $usedRange.Rows.Count - 1
+            Release-Com $usedRange
+            $grpRowUnion = $null
+            $grpRowCount = 0
+            for ($r = $firstRow; $r -le $lastRow; $r++) {
+                try {
+                    $rObj = $ws.Rows($r)
+                    if ($rObj.OutlineLevel -gt 1 -and -not $rObj.Hidden) {
+                        $grpRowCount++
+                        $grpRowUnion = if ($null -eq $grpRowUnion) { $rObj } else { $Excel.Union($grpRowUnion, $rObj) }
+                    } else { Release-Com $rObj }
+                } catch {}
+            }
+            if ($grpRowCount -gt 0) {
+                $grpRowUnion.Delete()
+                $counts["Expanded Grouped Rows Removed"] += $grpRowCount
+                Write-Log $ResultsFile "      Removed $grpRowCount expanded grouped row(s)."
+            }
+            Release-Com $grpRowUnion
+        } catch {
+            $msg = "      Error removing expanded grouped rows in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # D0b: Delete expanded (visible) outline-grouped columns.
+        # Same logic as D0a applied to columns.
+        try {
+            $usedRange   = $ws.UsedRange
+            $firstCol    = $usedRange.Column
+            $lastCol     = $firstCol + $usedRange.Columns.Count - 1
+            Release-Com $usedRange
+            $grpColUnion = $null
+            $grpColCount = 0
+            for ($c = $firstCol; $c -le $lastCol; $c++) {
+                try {
+                    $cObj = $ws.Columns($c)
+                    if ($cObj.OutlineLevel -gt 1 -and -not $cObj.Hidden) {
+                        $grpColCount++
+                        $grpColUnion = if ($null -eq $grpColUnion) { $cObj } else { $Excel.Union($grpColUnion, $cObj) }
+                    } else { Release-Com $cObj }
+                } catch {}
+            }
+            if ($grpColCount -gt 0) {
+                $grpColUnion.Delete()
+                $counts["Expanded Grouped Columns Removed"] += $grpColCount
+                Write-Log $ResultsFile "      Removed $grpColCount expanded grouped column(s)."
+            }
+            Release-Com $grpColUnion
+        } catch {
+            $msg = "      Error removing expanded grouped columns in '$shName' [$($fileItem.Name)]: $($_.Exception.Message)"
+            Write-ErrorLog $ErrorFile $msg; $errorList.Add($msg)
+        }
+
+        # Remove AutoFilter and clear outline groups before any further processing.
         # AutoFilter-hidden rows report .Hidden = True; if the filter is left active it
         # re-evaluates after each deletion pass and continuously hides more rows, making
         # the hidden-row removal loop never converge.  Clearing outlines ensures
