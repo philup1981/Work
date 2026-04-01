@@ -75,7 +75,8 @@ function New-ExcelInstance {
     $xl.AutomationSecurity     = 3       # msoAutomationSecurityForceDisable
     $xl.ScreenUpdating         = $false  # no redraws between operations
     $xl.EnableEvents           = $false  # no event-handler overhead
-    $xl.Calculation            = -4135   # xlCalculationManual - no auto-recalc on cell changes
+    # Note: Calculation cannot be set before a workbook is open (0x800A03EC).
+    # It is set to Manual per-workbook immediately after open instead.
     return $xl
 }
 
@@ -164,6 +165,10 @@ function Invoke-ProcessWorkbook {
     }
 
     Write-Log $ResultsFile "  Workbook opened successfully."
+
+    # Set Calculation to Manual here (not at Application startup) to avoid
+    # 0x800A03EC which Excel throws when no workbook is open yet.
+    try { $xl.Calculation = -4135 } catch {}   # xlCalculationManual
 
     # Calculate once to ensure all formula values are current before flattening.
     # Calculation is set to Manual on the Excel instance for speed, so we trigger
