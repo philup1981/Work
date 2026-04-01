@@ -370,10 +370,25 @@ function Invoke-ProcessWorkbook {
         # Area replaces formulas in-place without the clipboard, so merged cells are
         # handled correctly.  SpecialCells throws when no formula cells exist — caught
         # by the inner try/catch and treated as "nothing to do".
+        #
+        # UsedRange can be inflated by stray formatting on empty rows. Cells.Find with
+        # xlPrevious locates the true last content cell so SpecialCells only scans the
+        # real data extent rather than tens of thousands of empty rows.
         try {
-            $usedRng = $ws.UsedRange
+            $usedRng   = $ws.UsedRange
+            $searchRng = $usedRng
+            $trimmed   = $false
             try {
-                $fCells = $usedRng.SpecialCells(-4123)   # xlCellTypeFormulas
+                # xlFormulas=-4144, xlPart=2, xlByRows=1, xlPrevious=2
+                $lastContent = $ws.Cells.Find("*", $ws.Cells(1,1), -4144, 2, 1, 2)
+                if ($null -ne $lastContent) {
+                    $searchRng = $ws.Range($usedRng.Cells(1,1), $lastContent)
+                    $trimmed   = $true
+                    Release-Com $lastContent
+                }
+            } catch {}
+            try {
+                $fCells = $searchRng.SpecialCells(-4123)   # xlCellTypeFormulas
                 foreach ($area in $fCells.Areas) {
                     $area.Value2 = $area.Value2
                     Release-Com $area
@@ -382,6 +397,7 @@ function Invoke-ProcessWorkbook {
             } catch {
                 # No formula cells found on this sheet — nothing to flatten.
             }
+            if ($trimmed) { Release-Com $searchRng }
             $counts["Formulas Flattened"]++
             Write-Log $ResultsFile "      Formulas flattened (used range)"
             Release-Com $usedRng
@@ -676,35 +692,69 @@ function Invoke-ProcessWorkbook {
             # Chart objects are intentionally left in place — no QC check for charts.
 
             try {
-                $ur     = $sh.UsedRange
-                $rStart = $ur.Row; $rEnd = $rStart + $ur.Rows.Count - 1
-                $hidR   = 0
-                for ($r = $rStart; $r -le $rEnd; $r++) {
-                    $rObj = $sh.Rows.Item($r)
-                    if ($rObj.Hidden) { $hidR++ }
-                    Release-Com $rObj
+                $ur       = $sh.UsedRange
+                $rStart   = $ur.Row; $rEnd = $rStart + $ur.Rows.Count - 1
+                $firstCol = $ur.Column
+                $hidR     = 0
+                Release-Com $ur
+                try {
+                    $colSlice = $sh.Range($sh.Cells($rStart, $firstCol), $sh.Cells($rEnd, $firstCol))
+                    $visQC    = $colSlice.SpecialCells(12)   # xlCellTypeVisible
+                    Release-Com $colSlice
+                    $sortedQC = @($visQC.Areas) | Sort-Object { $_.Row }
+                    Release-Com $visQC
+                    $cur = $rStart
+                    foreach ($a in $sortedQC) {
+                        if ($a.Row -gt $cur) { $hidR += $a.Row - $cur }
+                        $cur = $a.Row + $a.Rows.Count
+                        Release-Com $a
+                    }
+                    if ($cur -le $rEnd) { $hidR += $rEnd - $cur + 1 }
+                } catch {
+                    # Fallback: per-row check
+                    for ($r = $rStart; $r -le $rEnd; $r++) {
+                        $rObj = $sh.Rows.Item($r)
+                        if ($rObj.Hidden) { $hidR++ }
+                        Release-Com $rObj
+                    }
                 }
                 if ($hidR -gt 0) {
                     $issue = "QC ISSUE: Sheet '$shQC' still has $hidR hidden row(s)."
                     $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
                 }
-                Release-Com $ur
             } catch {}
 
             try {
-                $ur     = $sh.UsedRange
-                $cStart = $ur.Column; $cEnd = $cStart + $ur.Columns.Count - 1
-                $hidC   = 0
-                for ($c = $cStart; $c -le $cEnd; $c++) {
-                    $cObj = $sh.Columns.Item($c)
-                    if ($cObj.Hidden) { $hidC++ }
-                    Release-Com $cObj
+                $ur       = $sh.UsedRange
+                $firstRow = $ur.Row
+                $cStart   = $ur.Column; $cEnd = $cStart + $ur.Columns.Count - 1
+                $hidC     = 0
+                Release-Com $ur
+                try {
+                    $rowSlice = $sh.Range($sh.Cells($firstRow, $cStart), $sh.Cells($firstRow, $cEnd))
+                    $visQC    = $rowSlice.SpecialCells(12)   # xlCellTypeVisible
+                    Release-Com $rowSlice
+                    $sortedQC = @($visQC.Areas) | Sort-Object { $_.Column }
+                    Release-Com $visQC
+                    $cur = $cStart
+                    foreach ($a in $sortedQC) {
+                        if ($a.Column -gt $cur) { $hidC += $a.Column - $cur }
+                        $cur = $a.Column + $a.Columns.Count
+                        Release-Com $a
+                    }
+                    if ($cur -le $cEnd) { $hidC += $cEnd - $cur + 1 }
+                } catch {
+                    # Fallback: per-column check
+                    for ($c = $cStart; $c -le $cEnd; $c++) {
+                        $cObj = $sh.Columns.Item($c)
+                        if ($cObj.Hidden) { $hidC++ }
+                        Release-Com $cObj
+                    }
                 }
                 if ($hidC -gt 0) {
                     $issue = "QC ISSUE: Sheet '$shQC' still has $hidC hidden column(s)."
                     $qcIssues.Add($issue); Write-Log $ResultsFile "    $issue"
                 }
-                Release-Com $ur
             } catch {}
 
             Release-Com $sh
