@@ -21,7 +21,8 @@
 
     Results.txt (per-file detail + grand totals) and Error.txt are written to
     <source folder>\Output\.
-    Excel COM is restarted every 25 files to prevent memory pressure on large batches (100+ files).
+    Files are processed in parallel: up to half the logical CPU count (capped at 4) Excel
+    instances run simultaneously, each handling one file, to maximise throughput on large batches.
 
 .NOTES
     - No external modules required.
@@ -36,8 +37,9 @@ param()   # No parameters - folder path is prompted interactively.
 
 Set-StrictMode -Off   # Allow unset variables without terminating.
 
-# Restart Excel COM every this many files to prevent memory buildup on large batches.
-$ExcelRestartInterval = 25
+# Maximum concurrent Excel instances. Each uses ~150-400 MB RAM.
+# Default: half of logical CPU count, capped at 4. Raise only if RAM allows.
+$MaxParallelFiles = [Math]::Max(1, [Math]::Min(4, [Math]::Floor([Environment]::ProcessorCount / 2)))
 
 # ===========================================================================
 # HELPER FUNCTIONS
@@ -47,14 +49,14 @@ function Write-Log {
     param([string]$FilePath, [string]$Message)
     $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
     Add-Content -LiteralPath $FilePath -Value $line -Encoding UTF8
-    Write-Host $line
+    if (-not $global:SuppressConsole) { Write-Host $line }
 }
 
 function Write-ErrorLog {
     param([string]$FilePath, [string]$Message)
     $line = "[ERROR][$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message"
     Add-Content -LiteralPath $FilePath -Value $line -Encoding UTF8
-    Write-Warning $line
+    if (-not $global:SuppressConsole) { Write-Warning $line }
 }
 
 function Release-Com {
@@ -70,7 +72,10 @@ function New-ExcelInstance {
     $xl.DisplayAlerts          = $false
     $xl.AskToUpdateLinks       = $false
     $xl.AlertBeforeOverwriting = $false
-    $xl.AutomationSecurity     = 3   # msoAutomationSecurityForceDisable — prevents macros running on open
+    $xl.AutomationSecurity     = 3       # msoAutomationSecurityForceDisable
+    $xl.ScreenUpdating         = $false  # no redraws between operations
+    $xl.EnableEvents           = $false  # no event-handler overhead
+    $xl.Calculation            = -4135   # xlCalculationManual - no auto-recalc on cell changes
     return $xl
 }
 
@@ -159,6 +164,11 @@ function Invoke-ProcessWorkbook {
     }
 
     Write-Log $ResultsFile "  Workbook opened successfully."
+
+    # Calculate once to ensure all formula values are current before flattening.
+    # Calculation is set to Manual on the Excel instance for speed, so we trigger
+    # one explicit pass here rather than relying on auto-recalc.
+    try { $workbook.Calculate() } catch {}
 
     # -----------------------------------------------------------------------
     # STEP A - Remove external data connections
@@ -854,99 +864,158 @@ Add-Content -LiteralPath $errorFile -Value $runHeader -Encoding UTF8
 Write-Log $resultsFile "Batch processing started. Files to process: $($excelFiles.Count)"
 
 # ---------------------------------------------------------------------------
-# Launch Excel once for the entire batch
+# Build function definitions string for injection into runspaces
 # ---------------------------------------------------------------------------
-Write-Log $resultsFile "Launching Microsoft Excel COM (current user context)."
+$funcDefs = [string]::Join("`n", @(
+    "function Write-Log { ${function:Write-Log} }",
+    "function Write-ErrorLog { ${function:Write-ErrorLog} }",
+    "function Release-Com { ${function:Release-Com} }",
+    "function New-FileCounts { ${function:New-FileCounts} }",
+    "function New-ExcelInstance { ${function:New-ExcelInstance} }",
+    "function Invoke-ProcessWorkbook { ${function:Invoke-ProcessWorkbook} }"
+))
 
-$excel = $null
-try {
-    $excel = New-ExcelInstance
-} catch {
-    $msg = "FATAL: Could not create Excel COM object. Is Microsoft Excel installed? Details: $($_.Exception.Message)"
-    Write-ErrorLog $errorFile $msg
-    Write-Error $msg
-    exit 1
+# ---------------------------------------------------------------------------
+# Runspace script block - each worker owns its own Excel instance
+# ---------------------------------------------------------------------------
+$runspaceScript = {
+    param($FilePath, $PassedDir, $FailedQcDir, $TmpResultsFile, $TmpErrorFile, $FuncDefs)
+    Set-StrictMode -Off
+    $global:SuppressConsole = $true
+    Invoke-Expression $FuncDefs
+    $excel  = $null
+    $result = $null
+    try {
+        $excel  = New-ExcelInstance
+        $result = Invoke-ProcessWorkbook `
+            -Excel       $excel `
+            -FilePath    $FilePath `
+            -PassedDir   $PassedDir `
+            -FailedQcDir $FailedQcDir `
+            -ResultsFile $TmpResultsFile `
+            -ErrorFile   $TmpErrorFile
+    } catch {
+        $result = @{ Counts = (New-FileCounts); Errors = @("Runspace fatal: $_"); Skipped = $true; QcFailed = $false }
+    } finally {
+        if ($null -ne $excel) {
+            try { $excel.Quit() } catch {}
+            try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null } catch {}
+        }
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+    }
+    return $result
 }
 
-Write-Log $resultsFile "Excel COM object ready. AutomationSecurity=ForceDisable (macros suppressed on open)."
+# ---------------------------------------------------------------------------
+# Create runspace pool (STA required for Excel COM)
+# ---------------------------------------------------------------------------
+$iss  = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+$pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(
+            1, $MaxParallelFiles, $iss, $Host)
+$pool.ApartmentState = [System.Threading.ApartmentState]::STA
+$pool.Open()
+
+Write-Log $resultsFile "Parallel workers: $MaxParallelFiles  (logical CPUs: $([Environment]::ProcessorCount))"
+Write-Log $resultsFile "Excel settings: ScreenUpdating=Off, EnableEvents=Off, Calculation=Manual"
 
 # ---------------------------------------------------------------------------
 # Initialise grand-total counters
 # ---------------------------------------------------------------------------
-$grandTotals      = New-FileCounts
-$skippedFiles     = [System.Collections.Generic.List[string]]::new()
-$allErrors        = [System.Collections.Generic.List[string]]::new()
-$filesProcessed   = 0
-$qcFailedFiles    = [System.Collections.Generic.List[string]]::new()
-$batchStart       = [datetime]::UtcNow
+$grandTotals    = New-FileCounts
+$skippedFiles   = [System.Collections.Generic.List[string]]::new()
+$allErrors      = [System.Collections.Generic.List[string]]::new()
+$filesProcessed = 0
+$qcFailedFiles  = [System.Collections.Generic.List[string]]::new()
+$batchStart     = [datetime]::UtcNow
+$jobs           = [System.Collections.Generic.List[hashtable]]::new()
 
 # ---------------------------------------------------------------------------
-# Process each file
+# Queue all files into the runspace pool
 # ---------------------------------------------------------------------------
 $fileIndex = 0
 foreach ($fileItem in $excelFiles) {
     $fileIndex++
-    $pct     = [math]::Round($fileIndex / $excelFiles.Count * 100, 1)
-    $elapsed = ([datetime]::UtcNow - $batchStart).TotalSeconds
-    $eta     = if ($fileIndex -gt 1) {
-                   $secsPerFile = $elapsed / ($fileIndex - 1)
-                   $remaining   = [int]($secsPerFile * ($excelFiles.Count - $fileIndex + 1))
-                   "ETA ~${remaining}s"
-               } else { "ETA calculating..." }
+    $pct = [math]::Round($fileIndex / $excelFiles.Count * 100, 1)
+    Write-Host "[$fileIndex / $($excelFiles.Count)] ($pct%)  Queued: $($fileItem.Name)"
 
-    Write-Host ""
-    Write-Host "[$fileIndex / $($excelFiles.Count)] ($pct%)  $($fileItem.Name)  - $eta"
+    $tmpResults = [System.IO.Path]::GetTempFileName()
+    $tmpErrors  = [System.IO.Path]::GetTempFileName()
 
-    # Restart Excel every $ExcelRestartInterval files to release COM memory pressure
-    if ($fileIndex -gt 1 -and (($fileIndex - 1) % $ExcelRestartInterval) -eq 0) {
-        Write-Log $resultsFile "Restarting Excel COM after $($fileIndex - 1) files (memory management)."
-        try { $excel.Quit() } catch {}
-        Release-Com $excel
-        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()
-        try {
-            $excel = New-ExcelInstance
-            Write-Log $resultsFile "Excel COM restarted successfully."
-        } catch {
-            $msg = "FATAL: Could not restart Excel COM at file $fileIndex. Aborting."
-            Write-ErrorLog $errorFile $msg; Write-Error $msg; break
-        }
-    }
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.RunspacePool = $pool
+    [void]$ps.AddScript($runspaceScript)
+    [void]$ps.AddParameters(@{
+        FilePath       = $fileItem.FullName
+        PassedDir      = $passedDir
+        FailedQcDir    = $failedQcDir
+        TmpResultsFile = $tmpResults
+        TmpErrorFile   = $tmpErrors
+        FuncDefs       = $funcDefs
+    })
 
-    $result = Invoke-ProcessWorkbook `
-        -Excel       $excel `
-        -FilePath    $fileItem.FullName `
-        -PassedDir   $passedDir `
-        -FailedQcDir $failedQcDir `
-        -ResultsFile $resultsFile `
-        -ErrorFile   $errorFile
-
-    if ($result.Skipped) {
-        $skippedFiles.Add($fileItem.Name)
-        Write-Log $resultsFile "  !! SKIPPED: $($fileItem.Name)"
-    } else {
-        $filesProcessed++
-        foreach ($key in @($grandTotals.Keys)) {
-            $grandTotals[$key] += $result.Counts[$key]
-        }
-        if ($result.QcFailed) { $qcFailedFiles.Add($fileItem.Name) }
-    }
-
-    foreach ($e in $result.Errors) { $allErrors.Add($e) }
-
-    [System.GC]::Collect()
-    [System.GC]::WaitForPendingFinalizers()
+    $jobs.Add(@{
+        PS         = $ps
+        Handle     = $ps.BeginInvoke()
+        File       = $fileItem.Name
+        TmpResults = $tmpResults
+        TmpErrors  = $tmpErrors
+    })
 }
 
-# ---------------------------------------------------------------------------
-# Quit Excel
-# ---------------------------------------------------------------------------
-try { $excel.Quit() } catch {}
-Release-Com $excel
-[System.GC]::Collect()
-[System.GC]::WaitForPendingFinalizers()
-[System.GC]::Collect()
+Write-Host ""
+Write-Host "All $($excelFiles.Count) file(s) queued across $MaxParallelFiles worker(s). Collecting results..."
+Write-Host ""
 
-Write-Log $resultsFile "Excel closed."
+# ---------------------------------------------------------------------------
+# Collect results as jobs complete
+# ---------------------------------------------------------------------------
+foreach ($job in $jobs) {
+    $result = $null
+    try {
+        $raw    = $job.PS.EndInvoke($job.Handle)
+        $result = if ($raw -is [array]) { $raw[0] } else { $raw }
+    } catch {
+        Write-Warning "Could not collect result for $($job.File): $_"
+    }
+
+    # Merge per-worker temp log files into the master logs
+    foreach ($pair in @( @($job.TmpResults, $resultsFile), @($job.TmpErrors, $errorFile) )) {
+        if (Test-Path -LiteralPath $pair[0]) {
+            $content = Get-Content -LiteralPath $pair[0] -Raw -Encoding UTF8
+            if ($content) { Add-Content -LiteralPath $pair[1] -Value $content.TrimEnd() -Encoding UTF8 }
+            Remove-Item -LiteralPath $pair[0] -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    foreach ($err in $job.PS.Streams.Error) { Write-Warning "Runspace error [$($job.File)]: $err" }
+    $job.PS.Dispose()
+
+    if ($null -ne $result) {
+        if ($result.Skipped) {
+            $skippedFiles.Add($job.File)
+            Write-Host "  SKIPPED  : $($job.File)"
+        } else {
+            $filesProcessed++
+            foreach ($key in @($grandTotals.Keys)) { $grandTotals[$key] += $result.Counts[$key] }
+            if ($result.QcFailed) { $qcFailedFiles.Add($job.File) }
+        }
+        foreach ($e in $result.Errors) { $allErrors.Add($e) }
+    }
+
+    $elapsed = [math]::Round(([datetime]::UtcNow - $batchStart).TotalSeconds)
+    $done    = $filesProcessed + $skippedFiles.Count
+    $eta     = if ($done -gt 0 -and $done -lt $excelFiles.Count) {
+                   $remaining = [int](($elapsed / $done) * ($excelFiles.Count - $done))
+                   "ETA ~${remaining}s"
+               } else { "" }
+    Write-Host "  Completed: $($job.File)  [${elapsed}s elapsed  $eta]"
+}
+
+$pool.Close()
+$pool.Dispose()
+
+Write-Log $resultsFile "All files processed."
 
 # ---------------------------------------------------------------------------
 # Grand-total summary in Results.txt
